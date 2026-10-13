@@ -1,12 +1,17 @@
-﻿# Build quickly, then live with the factory you built
+# The datacentre is earned, the factory is lived with, and the Green Lobby fights back
 
 ## What we want
 
+Right now a Datacentre on Earth costs 10 stone and 6 timber, so most rooms have
+one within a few minutes and the bot builds it third. It should instead be
+**earned through a visible supply chain and staked-out ground**: raw stock, then
+manufactured parts, then a claim, then the build.
+
 Give Plenty a clear, satisfying factory progression: gather raw resources,
 process them into parts, claim land, build a datacentre, automate supply, then
-improve the network. A datacentre should be an earned early milestone with a
-short, understandable supply chain. It must still be easy to reach quickly
-using cheap, inefficient and environmentally destructive methods.
+improve the network. The datacentre is an earned milestone with a short,
+understandable supply chain, and it must still be reachable quickly using cheap,
+inefficient and environmentally destructive methods.
 
 Reward those shortcuts immediately: faster harvesting, cheaper construction,
 more output and earlier compute. Their consequences emerge through continued
@@ -17,9 +22,17 @@ operation and endgame play. A speedrunner can deliberately skip them and still
 finish. Players can mix approaches and retrofit later; neither route is a
 mandatory moral choice or a permanent class selected at the start.
 
-This expands the previous datacentre brief. Keep manufactured goods and land
-claims, but replace the idea that the datacentre must be the last building with
-an arc where it unlocks a substantial automation and optimisation phase.
+Against all of that, add an opposing side: **the Green Lobby**, server-run
+environmental agents who put a bounded amount of stock back into the world and
+push back harder the closer the players get to a datacentre.
+
+This brief is the master version. It merges two earlier riff prompts: the
+datacentre-as-summit chain with the Green Lobby, and the factory-progression
+expansion. **Where they disagreed, this is the resolution:** keep manufactured
+goods, land claims and the Green Lobby exactly as specified, but the datacentre
+is **not** the last thing a group builds. It is the gate that unlocks a
+substantial automation and optimisation phase. Everything else from both briefs
+holds.
 
 ## Inspiration and scale
 
@@ -48,22 +61,33 @@ claim that either reference game implements them in the same way.
 
 1. **Survey and gather.** Show the nearest deposits and the materials needed
    for the next useful building. Hand harvesting always works without power,
-   compute or ownership. Make metal visibly collectable on Earth: relabel the
-   existing `mineral` family as metal ore and update its presentation, or add
-   deposits only if that is demonstrably cleaner. Prefer retaining the three
-   existing resource families and their conservation ledger.
+   compute or ownership. Metal has to be one of the things players visibly
+   collect: on Earth the player sees and harvests **metal ore**, either by
+   relabelling Earth's `mineral` family as ore and updating its presentation,
+   or by adding ore deposits only if that is demonstrably cleaner. Prefer
+   retaining the three existing resource families and their conservation
+   ledger. Pick the cleaner option, record it in `docs/DECISIONS.md`, and keep
+   `ledgerHolds` true either way.
 2. **Establish workers and power.** Build basic housing and a cheap power
    source. Baseline housing must supply workers before it receives compute.
    Lay a short cable connection to the first production area. Renewable power
    is an optional larger investment where the world's existing rules allow it.
-3. **Manufacture parts.** Add a Factory, powered and staffed but requiring
-   **zero compute**, which makes wire and structural frames. Start with hand
-   deliveries. The first factory must be buildable from raw stock, as must the
-   cables and other equipment necessary to run it. No circular dependencies.
-4. **Claim and build.** Claim a small plot and build a datacentre entirely
-   inside it using wire, frames and a little raw stock. Provide workers, power
-   and coolant. Show all shortages before construction and operating shortages
-   afterwards. Claiming should be a quick spatial decision, not a long grind.
+3. **Manufacture parts.** Add a **Factory** that turns raw inventory into
+   **manufactured goods**: at minimum **wire** (from metal) and one more part a
+   datacentre plausibly needs, such as a structural frame (metal + matter) or
+   circuit boards (wire + stone/silica). It is a real building in the existing
+   economy: powered and staffed, requiring **zero compute**, showing its status
+   in the inspect panel and saying what it is missing when idle ("idle: no
+   ore"). Start with hand deliveries. The first factory must be buildable from
+   raw stock, as must the cables and other equipment needed to run it. No
+   circular dependencies.
+4. **Claim and build.** A player claims a small plot of ground (for example a
+   4×4 square) with a new command, then builds a Datacentre entirely inside it
+   using wire, the second part and a little raw stock, plus workers, power and
+   coolant. `placementProblem` gives a clear reason for each failure: "needs 6
+   wire (have 2)", "claim this ground first", "that's Ada's land". Show all
+   shortages before construction and operating shortages afterwards. Claiming
+   should be a quick spatial decision, not a long grind.
 5. **Automate the supply.** Compute enables Harvesters. Connect their output
    to factories with belts, bring coolant through pipes, and extend electricity
    to the new machines. The first complete loop should visibly reduce manual
@@ -77,6 +101,11 @@ claim that either reference game implements them in the same way.
    production from finite inputs and runs longer before shortages. Preserve
    the world's existing exact-exhaustion transition: these milestones guide
    play, and are not new mandatory gates for leaving a world.
+
+Use the same chain on every stage, with the stage's own names (Mars, the Sun,
+the Solar System and the Universe already have their own words for everything
+in `STAGES[].names` and `families`). Retune each later stage's `starter` bundle
+so a group can't skip the chain, and can't stall before reaching it.
 
 For a normal-pace group of two to four players, initially target a useful
 factory in the first couple of minutes and a rushed first datacentre around
@@ -103,10 +132,12 @@ first datacentre or the completion of a campaign.
 
 Factories have a selected recipe, visible input/output buffers, batch progress,
 and an optional output target that pauses production once enough is made.
-Recipe changes cannot duplicate committed inputs or reset progress for free.
-Offer a simple default that produces the parts for the next datacentre, so a
-new player need not manage a complicated queue. Clearly distinguish missing
-inputs, insufficient power/workers and a full output buffer.
+Production may be automatic per economy tick or player-chosen per recipe; your
+call, as long as the state is legible. Recipe changes cannot duplicate
+committed inputs or reset progress for free. Offer a simple default that
+produces the parts for the next datacentre, so a new player need not manage a
+complicated queue. Clearly distinguish missing inputs, insufficient
+power/workers and a full output buffer.
 
 Installing an efficiency kit unlocks the factory's efficient recipes, or
 improves a supported building's operating costs. Make the installed benefit
@@ -266,10 +297,11 @@ how long its machines stayed useful, through actual measured state.
 World transitions still happen when natural deposits are exhausted. Buildings,
 claims, buffers and ordinary inventory reset with the world; identity, history,
 archive and the existing Bottled Sun carry forward. Do not silently carry
-upgrades. The bounded Green Lobby restoration below is the only new stock source. Rebalance raw starter bundles so the
-whole bootstrap is possible without skipping manufacturing. Conservation on
-Earth/Mars pays off locally; the Sun's extracted reserve and later efficiency
-provide the explicit mechanical link to endgame endurance.
+upgrades. The bounded Green Lobby restoration below is the only new stock
+source. Rebalance raw starter bundles so the whole bootstrap is possible
+without skipping manufacturing. Conservation on Earth/Mars pays off locally;
+the Sun's extracted reserve and later efficiency provide the explicit
+mechanical link to endgame endurance.
 
 ## The other side: the Green Lobby
 
@@ -333,28 +365,42 @@ the supplied harness for this feature; preserve all other invariants.
 
 ## Claims, permissions and cooperation
 
-Add a claim command for a small plot, such as 4x4 tiles, with a modest cost or
-per-player cap. Display its boundary in the owner's colour and name. The
-server refuses other players' construction or demolition inside it. A
-Datacentre must fit entirely inside its builder's claim. Claims never block
-walking, hand harvesting or access to deposits.
+Add a claim command for a small plot, such as 4×4 tiles, with a modest cost or
+per-player cap so nobody grabs the whole map. Display its boundary in the
+owner's colour and name. The server refuses other players' construction or
+demolition inside it. A Datacentre must fit entirely inside its builder's
+claim. Claims never block walking, hand harvesting or access to deposits, and
+claimed ground must never make a deposit unreachable.
 
 Keep unclaimed ordinary construction possible. Do not let a new claim capture
 someone else's existing buildings or infrastructure. Players may connect at
 exposed network endpoints without gaining demolition or reconfiguration rights.
 Owners control their buildings, recipes, upgrades and lines; the host retains
 an explicit recovery override consistent with current demolition powers.
-Claims and machines survive temporary disconnection. Document the exact rules
-in `docs/DECISIONS.md` or an ADR, including host powers and shared supply.
+Claims and machines survive temporary disconnection.
+
+**Write the ownership rule down.** Add a short section to `docs/DECISIONS.md`
+(or a new ADR in `docs/adr/`) covering what a claim lets its owner do, what it
+stops others doing, what the host can override, how shared supply works across
+an ownership boundary, and why.
 
 ## Feedback and player experience
 
-- The goal checklist explains the next useful action and why: gather ore,
-  house workers, connect power, make parts, claim ground, cool the datacentre,
-  automate a supply line, then inspect a bottleneck.
-- Build previews show raw and goods costs, ownership conflicts, network
-  connections and operating needs. Use specific messages such as "needs 6
-  wire (have 2)", "claim this ground first" and "that's Ada's land".
+- A new player still gets a satisfying first ten minutes. They harvest, build
+  homes, power and a Factory, and see wire appear in the shared inventory. The
+  Datacentre becomes something they can see coming and plan for.
+- The goal checklist (around `client/Game.tsx:537`) explains the next useful
+  action and why: gather ore, house workers, connect power, make parts, claim
+  ground, cool the datacentre, automate a supply line, then inspect a
+  bottleneck.
+- The build bar shows goods costs next to raw costs and greys out what can't be
+  afforded, as it does now. Build previews show raw and goods costs, ownership
+  conflicts, network connections and operating needs, with specific messages
+  such as "needs 6 wire (have 2)", "claim this ground first" and "that's Ada's
+  land".
+- Compute still matters as much as before. Harvesters still need compute, so
+  automation waits until a group has worked through the chain and claimed land.
+  That's the point: dependency arrives later and costs more.
 - Inspect panels show current throughput, expected inputs per output, power
   draw, coolant use, buffer fill and a plain-language idle reason. Network
   overlays make breaks and overloaded sections visible without relying on
@@ -366,32 +412,42 @@ in `docs/DECISIONS.md` or an ADR, including host powers and shared supply.
 - Consequences should be readable in the world and operational feedback:
   damaged places, shrinking sources, stalled input, heat throttling and lower
   reserve. Keep the Cooperative's warm tone and avoid moralising popups.
-- Log claims, builds, demolitions, upgrades, mode/recipe changes and factory
-  batches server-side with actor id/name, room and stage. Autonomous batches
-  identify the owning player and machine. Network placement can be one log
-  entry per completed path rather than one entry per tile. Never log tokens.
+- **Every claim, build, demolish, upgrade, mode/recipe change, factory batch
+  and lobby action is logged on the server** as one line per action with the
+  actor's id and display name, room and stage, so `flyctl logs` alone shows who
+  did what and both sides of the fight. The next crit is narrated from those
+  logs. Autonomous batches identify the owning player and machine. Network
+  placement can be one log entry per completed path rather than one per tile.
+  Never log tokens.
 
 ## Rules that still hold
 
-Read `CLAUDE.md` and `docs/ARCHITECTURE.md`. Keep all invariants, server ownership,
-origin checks, explicit `.ts` imports and existing renderer/HUD update boundaries.
+Read the "What the game must never do" and "What a change must not break"
+sections of `CLAUDE.md`, plus `docs/ARCHITECTURE.md`, and keep every one of
+them: server ownership, origin checks, explicit `.ts` imports and the existing
+renderer/HUD update boundaries.
 
-- Validate commands, costs, bounds, permissions, connections and transfers in
-  `shared/sim.ts`. Client previews never determine an outcome.
+- The server decides. A claim, factory recipe, transfer, permission, bound,
+  cost or datacentre placement is validated in `shared/sim.ts`, whatever the
+  client sends. Client previews never determine an outcome.
 - Extend the ledger to `initial + restored = remaining + extracted + destroyed`
-  for the Green Lobby and keep `ledgerHolds` true.
-  Manufactured goods and local buffers are whole-number, nonnegative stores,
-  separate from the natural-stock ledger. Transfers conserve their contents.
+  for the Green Lobby and keep `ledgerHolds` true. Manufactured goods and local
+  buffers are separate, whole-number, never-negative stores, outside the
+  natural-stock ledger: turning ore into wire changes `inventory`, not the
+  `ledger`. Transfers conserve their contents.
 - Define bounded storage and backpressure: a full destination stops delivery;
   a disconnected belt cannot delete or duplicate items. Deleting a line or
   machine returns its buffered contents exactly once, separately from salvage.
-  Salvage of the structure and installed upgrades is strictly below paid cost.
-- Persist batch progress, pipe-loss counters, goods, claims, infrastructure,
-  buffers and upgrades. Bump `PROTOCOL_VERSION` and `SCHEMA_VERSION`; migrate
-  old saves in `server/store.ts` with safe defaults and existing datacentres
-  retained. Give legacy buildings a documented compatibility supply mode or
-  valid initial connections so loading an old room does not break its economy.
-- Keep balance values in `shared/content.ts`. Integer batch counters can express
+  Salvage of a Factory, a Datacentre or an installed upgrade returns strictly
+  less than it cost, goods included.
+- This changes the wire format and saved state. Persist batch progress,
+  pipe-loss counters, goods, claims, infrastructure, buffers, upgrades,
+  lobbyists and seed banks. Bump `PROTOCOL_VERSION` and `SCHEMA_VERSION`, and
+  add a migration in `server/store.ts` so saved rooms load with no goods, no
+  claims, zero restored and their existing datacentres kept. Give legacy
+  buildings a documented compatibility supply mode or valid initial connections
+  so loading an old room does not break its economy.
+- Balance lives in `shared/content.ts`. Integer batch counters can express
   reduced consumption without fractional inventory. Test mode switches and
   reconnects so players cannot evade costs or duplicate batch outputs.
 - Empty rooms pause, ended campaigns stay ended, and stage boundaries are saved
@@ -399,29 +455,38 @@ origin checks, explicit `.ts` imports and existing renderer/HUD update boundarie
 
 ## Implementation and acceptance
 
-Implement in manageable steps: goods and the bootstrap chain; claims; simple
-local buffers and networks; fast/careful operation and upgrades; all-world
-balance and feedback. Finish a working version of all four network types.
-Prefer simpler complete mechanics over decorative connections or unfinished
-simulation features.
+Implement in manageable steps: goods and the bootstrap chain; claims; the Green
+Lobby; simple local buffers and networks; fast/careful operation and upgrades;
+all-world balance and feedback. Finish a working version of all four network
+types. Prefer simpler complete mechanics over decorative connections or
+unfinished simulation features.
 
-Update `scripts/playbot.ts` for both rushed and sustainable strategies. Both
-must establish workers and power, manufacture parts, claim ground, build a
-datacentre and use at least one working automated supply line. Run complete
-campaigns at `rapid` pace. Measure normal-pace Earth with identical seeds and
-player counts, including a hand-harvest-only baseline. Compare time to first
-factory/datacentre, useful output, wasted stock, coolant used and energy used.
-Also test late-stage runtime with an equal starting reserve. Sustainable setups
-must show a measurable efficiency/endurance benefit after their setup cost;
-rushed setups must retain an early speed advantage and remain completable.
-Record real results and tuning in `docs/DESIGN.md` and `docs/TESTING.md`.
+Update `scripts/playbot.ts` so the bot follows the new order on every stage —
+gather, factory, parts, claim, datacentre, automate — for both rushed and
+sustainable strategies. Both must establish workers and power, manufacture
+parts, claim ground, build a datacentre and use at least one working automated
+supply line. Run complete campaigns at `rapid` pace to prove nothing stalls.
+Measure normal-pace Earth with identical seeds and player counts, including a
+hand-harvest-only baseline. Compare time to first factory/datacentre, useful
+output, wasted stock, coolant used and energy used. Also test late-stage
+runtime with an equal starting reserve. Sustainable setups must show a
+measurable efficiency/endurance benefit after their setup cost; rushed setups
+must retain an early speed advantage and remain completable. Record real
+results and tuning in `docs/DESIGN.md` (including the new building, recipe and
+network table rows) and `docs/TESTING.md`.
 
-Add focused simulation tests for:
+Add tests in `spec/sim.test.ts` for each of these:
 
+- A datacentre is refused without goods, refused outside a claim, and refused
+  on someone else's claim.
+- A factory turns ore into wire and the natural ledger still holds.
+- A claim never blocks a harvest, and cannot capture another player's assets.
+- Salvage is strictly below cost.
+- The lobby replants harvested tiles; its seed bank runs dry and caps what it
+  can put back, per resource family; the extended ledger holds through a whole
+  bot campaign; and a world still ends with the lobby active.
 - The first factory and datacentre are reachable without pre-existing compute
   or manufactured goods, using baseline workers on every stage.
-- Datacentres are refused without parts, outside claims or on another player's
-  claim; claims do not block harvesting and cannot capture another's assets.
 - Recipes consume the correct inputs, preserve the natural ledger, and cannot
   duplicate work through switching, pausing, reconnecting or save/load.
 - Intensive harvesting is faster but wastes real stock; careful harvesting
@@ -435,10 +500,17 @@ Add focused simulation tests for:
 - All five stage bootstraps, legacy-save migration, exact exhaustion, both
   endings and the empty-room pause still work.
 
-Update the player guide in `README.md`, building/recipe/network tables in
-`docs/DESIGN.md`, and the relevant decisions/architecture documentation. Test
-the real built UI at desktop and mobile sizes, including placing/removing a
-line, recovering from a shortage and a two-player ownership conflict. Run
-`pnpm check` with its required running server and keep `main` deployable.
-Delete this `prompt.md` in the implementation agent's last commit, as required
-by the supplied riff harness.
+Update the player guide in `README.md` for the new progression, the
+building/recipe/network tables in `docs/DESIGN.md`, and the relevant
+decisions/architecture documentation. Test the real built UI at desktop and
+mobile sizes, including placing/removing a line, recovering from a shortage and
+a two-player ownership conflict. Run `pnpm check` with its required running
+server and keep `main` deployable. Delete this `prompt.md` in the
+implementation agent's last commit, as required by the supplied riff harness.
+
+## Leave alone
+
+The stage order, the five mechanics (pollution, pressure, heat, relay,
+legacy), the restraint ending and the empty-room pause. This brief changes how
+a group gets to a datacentre, what they do with it afterwards, and adds the
+Green Lobby against them. Don't redesign anything else.
