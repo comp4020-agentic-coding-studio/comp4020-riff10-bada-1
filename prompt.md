@@ -1,4 +1,4 @@
-# The datacentre is the summit, not the second building
+# The datacentre is the summit, and the Green Lobby fights it
 
 ## What we want
 
@@ -39,6 +39,45 @@ Use the same chain on every stage, with the stage's own names (Mars, the Sun,
 the Solar System and the Universe have their own words for everything already
 in `STAGES[].names` and `families`). Retune each later stage's `starter`
 bundle so a group can't skip the chain, and can't stall before reaching it.
+
+## The other side: the Green Lobby
+
+The players are the ones digging Earth up to get to a datacentre. Add an
+opposing side: **environmental lobby agents** who are against the
+datacentre and keep **putting resources back** into the world.
+
+- They're server-run characters (not players), drawn like players but clearly
+  different: their own look, a name ("Fern", "Moss" or similar), and a little
+  placard or sign. They walk the map on the server tick, so every open browser
+  sees the same lobbyist in the same place.
+- **They replant.** A lobbyist walks to a deposit the players have harvested
+  down (a stump, a dry pond, a dug-out ore pit) and puts stock back into it,
+  a little at a time. The tile visibly recovers.
+- **They push back harder as the datacentre gets closer.** A few lobbyists at
+  the start, more once a Factory runs, and more again for each Datacentre.
+  They can also picket a Datacentre site: stand beside it and slow its
+  construction, or protest with a speech bubble. Pick what reads best and is
+  fun, but it must never permanently block a player.
+- **It's a tug of war, not a stalemate.** Restoration has to be bounded or
+  the world never ends. Give the lobby a finite seed bank (for example a
+  share of the world's initial stock) that runs dry. Players can also
+  outpace them, so a world can always be finished.
+- **The books still balance.** Replanted stock is new stock entering the
+  world, so it can't appear off the books. Add a ledger column for it (for
+  example `restored`) and make the identity `initial + restored = remaining +
+  extracted + destroyed`. Update `ledgerHolds`, the transition summary table
+  and the tests to match. The seed bank also means the total can never
+  exceed a known bound.
+- **Earth first.** The lobby is strongest on Earth, where there's something
+  living to put back. Decide whether it follows the players to later worlds,
+  and how, and write that decision down in `docs/DECISIONS.md`. Keep the
+  restraint ending in the Universe intact.
+- **Every lobby action is logged on the server** like player actions, with
+  the lobbyist's name, the tile and the amount, so `flyctl logs` shows both
+  sides of the fight.
+- The HUD shows that the lobby exists: how many lobbyists are active, how
+  much of their seed bank is left, and a log line when they replant
+  ("Fern replanted the Old Oak's grove").
 
 ## What good looks like
 
@@ -91,6 +130,10 @@ sections of `CLAUDE.md` and keep every one of them.
   - a factory turns ore into wire and the ledger still holds
   - a claim never blocks a harvest
   - salvage is below cost
+  - the lobby replants harvested tiles
+  - the lobby's seed bank runs dry and caps what it can put back
+  - the ledger holds with restored stock, through a whole bot campaign
+  - a world still ends with the lobby active
 - Update `README.md` (the player guide) for the new progression.
 - `pnpm check` passes, `main` deploys, and you delete this `prompt.md` in your
   last commit.
@@ -98,5 +141,6 @@ sections of `CLAUDE.md` and keep every one of them.
 ## Leave alone
 
 The stage order, the five mechanics (pollution, pressure, heat, relay,
-legacy), the restraint ending and the empty-room pause. This brief only
-changes how a group gets to a datacentre, so don't redesign anything else.
+legacy), the restraint ending and the empty-room pause. This brief changes
+how a group gets to a datacentre and adds the Green Lobby against it, so don't
+redesign anything else.
