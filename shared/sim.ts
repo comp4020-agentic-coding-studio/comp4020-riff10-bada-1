@@ -212,20 +212,12 @@ export function leave(s: RoomState, id: string, ch: Changes): void {
   ch.meta = true;
 }
 
-export const footprint = (b: Pick<Building, "x" | "y" | "type">): [number, number][] => {
-  const n = BUILDINGS[b.type].size;
-  const out: [number, number][] = [];
-  for (let dy = 0; dy < n; dy++) for (let dx = 0; dx < n; dx++) out.push([b.x + dx, b.y + dy]);
-  return out;
-};
-
 const centre = (b: Pick<Building, "x" | "y" | "type">): [number, number] => {
   const h = (BUILDINGS[b.type].size - 1) / 2;
   return [b.x + h, b.y + h];
 };
 
 const isInt = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n);
-const inBounds = (s: RoomState, x: number, y: number): boolean => x >= 0 && y >= 0 && x < s.w && y < s.w;
 const tileAt = (s: RoomState, x: number, y: number): Tile | undefined => (inBounds(s, x, y) ? s.tiles[y * s.w + x] : undefined);
 const near = (p: Player, x: number, y: number, range: number): boolean => Math.hypot(p.x - x, p.y - y) <= range;
 const complete = (b: Building): boolean => b.work >= BUILDINGS[b.type].build * 10;

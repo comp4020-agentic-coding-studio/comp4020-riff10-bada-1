@@ -8,6 +8,17 @@ export const FAMILIES = ["matter", "mineral", "coolant"] as const;
 export type Family = (typeof FAMILIES)[number];
 export type Bundle = Record<Family, number>;
 
+/** Manufactured goods: whole-number stores outside the natural-stock ledger. */
+export const GOODS = ["wire", "frame", "kit"] as const;
+export type Good = (typeof GOODS)[number];
+export type Goods = Record<Good, number>;
+/** Anything that can sit in a stockpile, a buffer or on a belt. */
+export const ITEMS = [...FAMILIES, ...GOODS] as const;
+export type Item = Family | Good;
+export type Cost = Partial<Record<Item, number>>;
+export const isItem = (v: unknown): v is Item => typeof v === "string" && (ITEMS as readonly string[]).includes(v);
+export const isGood = (v: unknown): v is Good => typeof v === "string" && (GOODS as readonly string[]).includes(v);
+
 export const BUILDING_TYPES = [
   "extractor",
   "furnace",
@@ -20,12 +31,16 @@ export const BUILDING_TYPES = [
   "plaza",
   "depot",
   "engine",
+  "factory",
+  "store",
+  "intake",
 ] as const;
 export type BuildingType = (typeof BUILDING_TYPES)[number];
 
 export interface BuildingDef {
   size: 1 | 2;
-  cost: Partial<Bundle>;
+  /** raw stock and manufactured goods, paid from the shared stockpile */
+  cost: Cost;
   /** construction time in economy ticks */
   build: number;
   energy: number; // + produces, - consumes (per economy tick)
@@ -46,6 +61,14 @@ export interface BuildingDef {
   /** energy released into the reserve when this is rendered down */
   renderValue?: number;
   tall?: boolean;
+  /** local coolant tank: filled by hand (tend) or by pipes from an intake */
+  tank?: number;
+  /** can take an efficiency kit (built efficiently, or retrofitted later) */
+  kit?: string;
+  /** can be built out in open space */
+  floats?: boolean;
+  /** a Datacentre must sit entirely inside its builder's claim */
+  needsClaim?: boolean;
   blurb: string;
 }
 
@@ -60,7 +83,8 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     extract: 1,
     pollution: { radius: 1, amount: 4 },
     heat: 2,
-    blurb: "Harvests every neighbouring deposit by itself. Needs power and compute.",
+    kit: "careful extraction at full speed: 2 a tick, nothing wasted",
+    blurb: "Harvests a neighbouring deposit into its own hopper. Needs power and compute; belt the hopper away or collect it.",
   },
   furnace: {
     size: 1,
@@ -72,7 +96,8 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     fuelUse: 1,
     pollution: { radius: 2, amount: 3, burnsMatter: 1 },
     tall: true,
-    blurb: "Burns matter for lots of power. Its smoke browns the land and kills nearby groves.",
+    kit: "a cleaner burn: half the fuel, smoke reaches only 1 tile",
+    blurb: "Burns matter for lots of power, lit only when its grid needs it. Its smoke browns the land and kills nearby groves.",
   },
   solar: {
     size: 2,
@@ -88,14 +113,14 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     cost: { matter: 12, mineral: 6 },
     build: 5,
     energy: -1,
-    workers: 2,
+    workers: 3,
     compute: -1,
     tall: true,
-    blurb: "Homes for workers. Served with compute, a city houses far more of them.",
+    blurb: "Homes for 3 workers, no power needed. Cabled to power and served with compute, it houses 6.",
   },
   datacentre: {
     size: 2,
-    cost: { mineral: 10, matter: 6 },
+    cost: { mineral: 4, matter: 4, wire: 6, frame: 2 },
     build: 6,
     energy: -2,
     workers: -2,
@@ -103,7 +128,10 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     coolantUse: 1,
     heat: 3,
     tall: true,
-    blurb: "Turns power, workers and coolant into compute: automation, services, growth.",
+    tank: 30,
+    needsClaim: true,
+    kit: "recirculating cooling: drinks half the coolant for the same compute",
+    blurb: "Turns power, workers and coolant into compute. Needs parts from a factory, and your own claimed ground.",
   },
   habitat: {
     size: 2,
@@ -115,6 +143,8 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     coolantUse: 1,
     pressureRadius: 4,
     tall: true,
+    tank: 30,
+    kit: "a sealed dome: half the ice for the same air",
     blurb: "A sealed dome. Machines only run inside the air it holds.",
   },
   radiator: {
@@ -129,6 +159,7 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
   },
   relay: {
     size: 1,
+    floats: true,
     cost: { mineral: 4, matter: 2 },
     build: 2,
     energy: -1,
@@ -156,7 +187,7 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     relayRange: 6,
     protected: true,
     tall: true,
-    blurb: "The Cooperative's shared depot. Everything the relays carry ends up here.",
+    blurb: "The Cooperative's shared depot, and the tap on the Bottled Sun: cable a grid to it to power machines.",
   },
   engine: {
     size: 2,
@@ -169,6 +200,114 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     tall: true,
     blurb: "A whole spent world, running as compute. Render it down for a burst of energy.",
   },
+  factory: {
+    size: 2,
+    cost: { mineral: 8, matter: 6 },
+    build: 4,
+    energy: -2,
+    workers: -1,
+    compute: 0,
+    heat: 2,
+    tall: true,
+    kit: "unlocks efficient recipes: more parts from the same ore, more slowly",
+    blurb: "Turns raw stock into parts. Load it by hand (F) or feed it with belts. Needs power and workers, never compute.",
+  },
+  store: {
+    size: 1,
+    cost: { matter: 4 },
+    build: 1,
+    energy: 0,
+    workers: 0,
+    compute: 0,
+    blurb: "The end of a belt: whatever arrives goes into the shared stockpile.",
+  },
+  intake: {
+    size: 1,
+    floats: true,
+    cost: { mineral: 4 },
+    build: 2,
+    energy: -1,
+    workers: 0,
+    compute: 0,
+    blurb: "Pumps coolant from a deposit beside it into its tank. Pipes carry it to datacentres; or collect it by hand.",
+  },
+};
+
+/** Production recipes. `ticks` are economy ticks per batch. */
+export type Recipe = "wire" | "frame" | "kit";
+export const RECIPES: Record<Recipe, { quick: { in: Cost; out: number; ticks: number }; efficient: { in: Cost; out: number; ticks: number } }> = {
+  wire: { quick: { in: { mineral: 3 }, out: 2, ticks: 2 }, efficient: { in: { mineral: 3 }, out: 3, ticks: 4 } },
+  frame: { quick: { in: { mineral: 4, matter: 3 }, out: 1, ticks: 2 }, efficient: { in: { mineral: 3, matter: 2 }, out: 1, ticks: 4 } },
+  kit: { quick: { in: { wire: 2, frame: 1 }, out: 1, ticks: 3 }, efficient: { in: { wire: 2, frame: 1 }, out: 1, ticks: 3 } },
+};
+export const RECIPE_LIST = Object.keys(RECIPES) as Recipe[];
+/** what the factory's default ("auto") recipe aims to have in hand: the next datacentre's parts */
+export const NEXT_DATACENTRE: Partial<Record<Good, number>> = { wire: 6, frame: 2 };
+/** per-item cap on a factory's input buffer and on any machine's output hopper */
+export const INPUT_CAP = 12;
+export const OUTPUT_CAP = 12;
+export const HOPPER_CAP = 10;
+export const INTAKE_TANK = 20;
+/** coolant a pump lifts from the deposit beside it per economy tick */
+export const INTAKE_RATE = 2;
+/** extra power a kit costs to run (its trade-off), or for a furnace, power it gives up */
+export const KIT_POWER: Partial<Record<BuildingType, number>> = { extractor: 1, datacentre: 1, habitat: 1, furnace: 1 };
+
+/** Networks laid tile by tile. q 0 is cheap, q 1 the efficient version. */
+export type LineKind = "cable" | "pipe" | "belt" | "path";
+export const LINE_KINDS: LineKind[] = ["cable", "pipe", "belt", "path"];
+export const LINES: Record<LineKind, { cost: [Cost, Cost | null]; q: [string, string | null]; life: [number, number]; blurb: string }> = {
+  cable: { cost: [{ mineral: 1 }, null], q: ["cable", null], life: [60, 60], blurb: "Joins generators to machines: anything touching a cable is on its grid. Every 10 tiles of cable loses 1 power." },
+  pipe: { cost: [{ mineral: 1 }, { mineral: 1, wire: 1 }], q: ["cheap pipe", "sealed pipe"], life: [50, 75], blurb: "Carries coolant from a pump to tanks, 6 a tick. Cheap pipe leaks more the longer it runs; sealed pipe doesn't leak." },
+  belt: { cost: [{ mineral: 1, matter: 1 }, { mineral: 1, matter: 1, wire: 1 }], q: ["belt", "fast belt"], life: [40, 55], blurb: "Moves items one tile a tick toward its arrow, into a factory, a tank or a store. A fast belt carries two." },
+  path: { cost: [{ matter: 1 }, { matter: 2, mineral: 1 }], q: ["rough track", "laid path"], life: [25, 80], blurb: "Walk 60% faster along it. A rough track tramples the ground; a laid path costs more and barely marks it." },
+};
+/** a long cable network loses this many tiles' worth per power unit each tick */
+export const CABLE_LOSS_TILES = 10;
+/** cheap pipe leaks 1 coolant per this many (units × cheap tiles) carried */
+export const PIPE_LEAK_EVERY = 80;
+/** coolant a pipe network can move per economy tick */
+export const PIPE_BUDGET = 6;
+export const PATH_SPEED = 1.6;
+export const MAX_LINE_TILES = 32;
+export const LINE_RANGE = 14;
+
+/** Claims: a square of ground that only its owner (or the host) builds on. */
+export const CLAIM_SIZE = 4;
+export const CLAIMS_PER_PLAYER = 2;
+export const CLAIM_COST: Cost = { matter: 3 };
+
+/** Hand harvesting: careful takes one, intensive takes two and wastes one. */
+export const HARVEST_MODES = {
+  careful: { useful: 1, waste: 0, scar: 0 },
+  intensive: { useful: 2, waste: 1, scar: 4 },
+} as const;
+export type HarvestMode = keyof typeof HARVEST_MODES;
+
+/** The Green Lobby: server-run agents who put stock back from a finite seed bank. */
+export const LOBBY = {
+  names: ["Fern", "Moss", "Sorrel", "Wren", "Bramble", "Linden", "Clover", "Yarrow"],
+  /** share of each family's initial stock the seed bank holds, per stage; absent: the lobby stays home */
+  bankShare: {
+    earth: { matter: 0.12, mineral: 0.04, coolant: 0.1 },
+    mars: { coolant: 0.05 },
+  } as Partial<Record<string, Partial<Record<Family, number>>>>,
+  /** how many walk the map: a few at the start, more per running factory and per datacentre */
+  base: 2,
+  perFactory: 1,
+  perDatacentre: 2,
+  max: 7,
+  speed: 2.2, // tiles a second
+  /** economy ticks of picketing a site can take in all; while picketed it rises at half speed */
+  picketTicks: 20,
+  /** units a lobbyist puts back per economy tick while planting, and at most per visit */
+  plant: 1,
+  visit: 6,
+  /** share of each family's initial stock the bank holds, by stage */
+  /** what a replanted tile is called, by family */
+  places: { matter: "grove", mineral: "ore pit", coolant: "pond" } as Record<Family, string>,
+  signs: ["Leave it be", "Water for herons", "Trees not servers", "Enough is plenty", "Grow, don't mine"],
+  shouts: ["Not on our pond!", "Compute can wait!", "Who asked the trees?", "Plenty is enough!"],
 };
 
 export type StageId = "earth" | "mars" | "sun" | "system" | "universe";
@@ -193,6 +332,7 @@ export interface StageDef {
   families: Record<Family, FamilySpec>;
   buildings: BuildingType[];
   names: Partial<Record<BuildingType, string>>;
+  goods: Record<Good, string>;
   starter: Bundle;
   landmarks: string[];
   /** solar output multiplier for this stage */
@@ -220,10 +360,10 @@ export const STAGES: StageDef[] = [
     energySource: "local",
     families: {
       matter: { label: "timber", tiles: 34, perTile: 18 },
-      mineral: { label: "stone", tiles: 16, perTile: 20 },
+      mineral: { label: "metal ore", tiles: 16, perTile: 20 },
       coolant: { label: "fresh water", tiles: 14, perTile: 14 },
     },
-    buildings: ["city", "plaza", "furnace", "solar", "datacentre", "extractor"],
+    buildings: ["city", "plaza", "furnace", "solar", "factory", "store", "datacentre", "extractor", "intake"],
     names: {
       city: "Cottages",
       furnace: "Furnace",
@@ -231,16 +371,20 @@ export const STAGES: StageDef[] = [
       datacentre: "Datacentre",
       extractor: "Harvester",
       plaza: "Plaza",
+      factory: "Factory",
+      store: "Store",
+      intake: "Pump",
     },
+    goods: { wire: "wire", frame: "frame", kit: "efficiency kit" },
     starter: { matter: 0, mineral: 0, coolant: 0 },
-    landmarks: ["The Old Oak", "Heron Pond", "Picnic Hill", "Granite Seat"],
+    landmarks: ["The Old Oak", "Heron Pond", "Picnic Hill", "Rust Knoll"],
     solarScale: 1,
     palette: {
       sky: ["#bfe7ff", "#fdf3d8"],
       lush: [126, 196, 104],
       dead: [150, 128, 104],
       matter: "#3f8f4f",
-      mineral: "#a6a39b",
+      mineral: "#9c7f6a",
       coolant: "#5bb6e8",
     },
     arrival: "The Plenty Cooperative welcomes you to Earth. Everything here is yours to use.",
@@ -259,7 +403,7 @@ export const STAGES: StageDef[] = [
       mineral: { label: "iron", tiles: 18, perTile: 20 },
       coolant: { label: "buried ice", tiles: 18, perTile: 16 },
     },
-    buildings: ["habitat", "solar", "city", "datacentre", "extractor", "plaza"],
+    buildings: ["habitat", "solar", "city", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
       habitat: "Dome",
       solar: "Solar Field",
@@ -267,8 +411,12 @@ export const STAGES: StageDef[] = [
       datacentre: "Cold Datacentre",
       extractor: "Rover Drill",
       plaza: "Garden Pod",
+      factory: "Pressure Factory",
+      store: "Airlock Store",
+      intake: "Ice Melter",
     },
-    starter: { matter: 20, mineral: 40, coolant: 12 },
+    goods: { wire: "wire", frame: "pressure frame", kit: "efficiency kit" },
+    starter: { matter: 24, mineral: 46, coolant: 16 },
     landmarks: ["First Footprint", "Ice Cathedral", "Olympus Lookout"],
     solarScale: 2,
     palette: {
@@ -295,7 +443,7 @@ export const STAGES: StageDef[] = [
       mineral: { label: "magnetics", tiles: 16, perTile: 18 },
       coolant: { label: "shade", tiles: 14, perTile: 14 },
     },
-    buildings: ["solar", "radiator", "datacentre", "city", "extractor", "plaza"],
+    buildings: ["solar", "city", "factory", "store", "datacentre", "radiator", "extractor", "intake", "plaza"],
     names: {
       solar: "Collector Wing",
       radiator: "Radiator",
@@ -303,8 +451,12 @@ export const STAGES: StageDef[] = [
       city: "Crew Ring",
       extractor: "Plasma Scoop",
       plaza: "Viewing Deck",
+      factory: "Assembly Platform",
+      store: "Cargo Bay",
+      intake: "Shade Vane",
     },
-    starter: { matter: 20, mineral: 50, coolant: 10 },
+    goods: { wire: "superconductor", frame: "heat shield", kit: "efficiency kit" },
+    starter: { matter: 24, mineral: 40, coolant: 10 },
     landmarks: ["Morning", "The Last Noon"],
     solarScale: 4,
     palette: {
@@ -331,7 +483,7 @@ export const STAGES: StageDef[] = [
       mineral: { label: "asteroid metal", tiles: 22, perTile: 18 },
       coolant: { label: "comet ice", tiles: 16, perTile: 14 },
     },
-    buildings: ["relay", "datacentre", "city", "extractor", "plaza"],
+    buildings: ["city", "relay", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
       relay: "Relay",
       datacentre: "Orbital Datacentre",
@@ -339,7 +491,11 @@ export const STAGES: StageDef[] = [
       extractor: "Asteroid Miner",
       plaza: "Observation Ring",
       depot: "Cooperative Depot",
+      factory: "Orbital Factory",
+      store: "Cargo Bay",
+      intake: "Comet Tap",
     },
+    goods: { wire: "relay wire", frame: "truss", kit: "efficiency kit" },
     starter: { matter: 20, mineral: 40, coolant: 10 },
     landmarks: ["Ceres Pier", "The Long Comet"],
     solarScale: 0,
@@ -367,14 +523,18 @@ export const STAGES: StageDef[] = [
       mineral: { label: "stellar cores", tiles: 20, perTile: 18 },
       coolant: { label: "dark cold", tiles: 16, perTile: 14 },
     },
-    buildings: ["datacentre", "city", "extractor", "plaza"],
+    buildings: ["city", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
       datacentre: "Matrioshka Shell",
       city: "Mind City",
       extractor: "Galaxy Siphon",
       plaza: "Memorial",
       engine: "World Engine",
+      factory: "Cosmic Foundry",
+      store: "Store",
+      intake: "Cold Tap",
     },
+    goods: { wire: "light thread", frame: "shell lattice", kit: "efficiency kit" },
     starter: { matter: 30, mineral: 50, coolant: 10 },
     landmarks: ["Andromeda", "The Quiet Arm"],
     solarScale: 0,
@@ -418,6 +578,14 @@ export const HEAT_LIMIT = 70;
 
 export const EMOTES = ["wave", "heart", "laugh", "wow", "sad", "point"] as const;
 export type Emote = (typeof EMOTES)[number];
+
+export const itemLabel = (stage: StageDef, item: Item): string => (isGood(item) ? stage.goods[item] : stage.families[item as Family].label);
+
+/** Efficient construction: extra parts and time for less damage and the building's kit benefit built in. */
+export const EFFICIENT_EXTRA: Cost = { wire: 2, frame: 1 };
+export const EFFICIENT_BUILD = 1.5;
+/** the life a building leaves its footprint, standard and efficient */
+export const BUILD_SCAR = { standard: 15, efficient: 45 };
 
 export function buildingName(stage: StageDef, type: BuildingType): string {
   return stage.names[type] ?? type[0].toUpperCase() + type.slice(1);
