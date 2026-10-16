@@ -23,6 +23,7 @@ import {
   MAX_IDENTITIES,
   MAX_PLAYERS,
   PACES,
+  RECIPES,
   RECIPE_LIST,
   STAGES,
   SUN_TO_RESERVE,
@@ -601,9 +602,10 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       return OK;
     }
     case "set": {
+      const isMode = (m: unknown): m is keyof typeof HARVEST_MODES => typeof m === "string" && Object.hasOwn(HARVEST_MODES, m);
       if (c.mode !== undefined && c.x === undefined) {
         // the player's own hand-harvest mode
-        if (!Object.hasOwn(HARVEST_MODES, c.mode)) return no("unknown harvest mode");
+        if (!isMode(c.mode)) return no("unknown harvest mode");
         if (p.mode !== c.mode) {
           p.mode = c.mode;
           ev("mode", { harvest: c.mode });
@@ -613,30 +615,23 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       const b = buildingOn(s, c.x, c.y);
       if (!b) return no("nothing built there");
       if (!mayControl(s, b, pid)) return no(`that's ${ownerName(s, b.owner)}'s ${buildingName(st, b.type)}: only they or the host can change it`);
-      const changes: Record<string, string | number | boolean> = {};
+      // check every field before applying any, so a refused setting changes nothing
       if (c.recipe !== undefined) {
         if (b.type !== "factory") return no("only a factory has recipes");
-        if (c.recipe !== "auto" && !RECIPE_LIST.includes(c.recipe)) return no("unknown recipe");
-        // a batch in progress finishes as it was started: switching never refunds or duplicates it
-        b.recipe = c.recipe;
-        changes.recipe = c.recipe;
+        if (c.recipe !== "auto" && !(typeof c.recipe === "string" && (RECIPE_LIST as string[]).includes(c.recipe))) return no("unknown recipe");
       }
-      if (c.target !== undefined) {
-        if (b.type !== "factory" || !isInt(c.target) || c.target < 0 || c.target > 99) return no("a target is a whole number from 0 to 99");
-        b.target = c.target;
-        changes.target = c.target;
-      }
+      if (c.target !== undefined && (b.type !== "factory" || !isInt(c.target) || c.target < 0 || c.target > 99)) return no("a target is a whole number from 0 to 99");
       if (c.quick !== undefined) {
         if (b.type !== "factory" || typeof c.quick !== "boolean") return no("malformed setting");
         if (!b.kit) return no("only a factory with an efficiency kit has a choice of recipes");
-        b.quick = c.quick;
-        changes.quick = c.quick;
       }
-      if (c.mode !== undefined) {
-        if (b.type !== "extractor" || !Object.hasOwn(HARVEST_MODES, c.mode)) return no("only a harvester has a mode");
-        b.mode = c.mode;
-        changes.mode = c.mode;
-      }
+      if (c.mode !== undefined && (b.type !== "extractor" || !isMode(c.mode))) return no("only a harvester has a mode");
+      const changes: Record<string, string | number | boolean> = {};
+      // a batch in progress finishes as it was started: switching never refunds or duplicates it
+      if (c.recipe !== undefined) b.recipe = changes.recipe = c.recipe;
+      if (c.target !== undefined) b.target = changes.target = c.target;
+      if (c.quick !== undefined) b.quick = changes.quick = c.quick;
+      if (c.mode !== undefined) b.mode = changes.mode = c.mode;
       if (!Object.keys(changes).length) return no("nothing to change");
       ch.buildings.add(b.id);
       ev("set", { building: b.type, id: b.id, owner: b.owner ?? "", ...changes });
@@ -683,8 +678,8 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
           if (n > 0) held[k] = (held[k] ?? 0) + n;
         };
         for (const st2 of [b.buf, b.out]) if (st2) for (const [k, v] of Object.entries(st2)) put(k as Item, v ?? 0);
-        if (b.job) for (const [k, v] of Object.entries(recipeOf(b, b.job.r).in)) put(k as Item, v ?? 0);
-        if (b.tank && !b.legacy) put("coolant", b.tank);
+        if (b.job) for (const [k, v] of Object.entries(b.job.in ?? (b.job.eff ? RECIPES[b.job.r].efficient.in : RECIPES[b.job.r].quick.in))) put(k as Item, v ?? 0);
+        if (b.tank) put("coolant", b.tank);
         for (const [k, v] of Object.entries(held)) add(s, k as Item, v ?? 0);
         log(s, ch, `${p.name} took down ${b.owner === pid ? "a" : `${ownerName(s, b.owner)}'s`} ${buildingName(st, b.type)}.`);
         ev("demolish", { building: b.type, id: b.id, owner: b.owner ?? "", salvage: fmt(salvage), returned: fmt(held) });

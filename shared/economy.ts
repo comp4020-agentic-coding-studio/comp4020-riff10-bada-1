@@ -505,7 +505,8 @@ function factory(s: RoomState, f: Building, powered: boolean, ch: Changes): void
   }
   if (!powered) return;
   for (const [k, v] of Object.entries(rec.in)) f.buf[k as Item] = (f.buf[k as Item] ?? 0) - (v ?? 0);
-  f.job = { r: next.r, n: rec.out, left: rec.ticks, eff: !!(f.kit && !f.quick) };
+  // the committed inputs travel with the batch, so a refund returns exactly them whatever the settings become
+  f.job = { r: next.r, n: rec.out, left: rec.ticks, eff: !!(f.kit && !f.quick), in: { ...rec.in } };
   setStatus(f, `making ${itemLabel(st, next.r)}`, ch);
   ch.buildings.add(f.id);
 }
@@ -588,7 +589,8 @@ function accepts(s: RoomState, b: Building, item: Item): number {
     else for (const r of ["wire", "frame"] as Recipe[]) for (const k of Object.keys(recipeOf(b, r).in)) want.add(k);
     return want.has(item) ? Math.max(0, INPUT_CAP - (b.buf?.[item] ?? 0)) : 0;
   }
-  if (BUILDINGS[b.type].tank && item === "coolant") return Math.max(0, BUILDINGS[b.type].tank! - (b.tank ?? 0));
+  // legacy buildings cool from the stockpile; their tanks take nothing
+  if (BUILDINGS[b.type].tank && item === "coolant" && !b.legacy) return Math.max(0, BUILDINGS[b.type].tank! - (b.tank ?? 0));
   return 0;
 }
 

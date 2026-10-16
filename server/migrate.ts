@@ -39,6 +39,8 @@ export function migrate1to2(raw: Json): RoomState {
   s.lobby = newLobby(s.stage, s.ledger);
   s.econ = { ...s.econ, unwired: 0, drawn: 0 };
   for (const b of s.buildings) {
+    // the Cooperative's own buildings (a Depot, World Engines) were never anyone's economy
+    if (!b.owner) continue;
     b.legacy = true;
     if (b.type === "extractor") b.mode = "intensive";
   }

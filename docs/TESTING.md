@@ -30,6 +30,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 
 - a datacentre is refused without goods ("needs 6 wire (have 0)"), outside any claim ("claim this ground first") and on someone else's ("that's A's land"), and is built from the parts on its owner's claim
 - on every one of the five worlds, two bots starting from the starter crate (no goods, no compute) reach a working factory and a finished datacentre, the ledger holding every tick
+- a factory taken down mid-batch refunds exactly the inputs the batch committed, even after its recipe settings changed (an independent review found the quick recipe's inputs refunded instead); a setting with one bad field changes nothing, and a non-string harvest mode is refused
 - a factory turns ore loaded from the stockpile into wire, collected back into it, and the natural ledger doesn't move; a batch commits exactly its recipe, and switching recipe mid-batch, a reconnect, or a save and reload produce exactly one batch; idle states name missing inputs, a full output, and a missing cable; with a kit, the same ore makes more wire, more slowly
 - claims: can't be drawn over another player's building; never block a hand harvest or walking; the host can give one up; at most two per player
 - salvage of an efficient datacentre returns strictly less than it cost (goods included) and its tank's coolant exactly once; a kit fitted later never comes back whole
@@ -42,7 +43,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 - rushed against sustainable bots on one Earth: both reach a factory, a datacentre and automation; the rush gets its datacentre sooner, destroys more than five times as much, and never buys a kit; the green route extracts more useful stock and keeps its datacentre running longer
 - both strategies finish a whole five-world campaign with the books balanced on every tick and a datacentre on every world
 - an equal Bottled Sun makes more parts through an efficient factory than a quick one before it runs out, and an idle factory leaves the reserve alone
-- a schema-1 room migrates with no goods, no claims and zero restored, keeps its datacentre, and the datacentre keeps running
+- a schema-1 room migrates with no goods, no claims and zero restored, keeps its datacentre, and the datacentre keeps running; a belt carrying coolant into a legacy datacentre delivers nothing (the review found it vanished into a tank legacy buildings never drink from)
 
 **`spec/server.test.ts`**, the real server over HTTP and WebSocket:
 
@@ -59,7 +60,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 
 **`spec/invariants.test.ts`**, the course's: `/` answers and `/readme/` publishes this README with every heading.
 
-52 tests, all passing locally against a freshly built server.
+54 tests, all passing locally against a freshly built server.
 
 ## Multiplayer playthroughs
 

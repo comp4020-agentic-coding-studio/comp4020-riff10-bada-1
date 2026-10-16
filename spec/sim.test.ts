@@ -530,6 +530,33 @@ describe("factories", () => {
     }
   });
 
+  it("refund exactly the inputs a batch committed when taken down mid-batch, whatever the settings became", () => {
+    const { s, ch, f } = factoryRoom();
+    f.kit = true;
+    stand(s, "a", f.x, f.y);
+    ok(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, recipe: "frame" }));
+    f.buf = { mineral: 3, matter: 2 };
+    econ(s, ch, 1);
+    expect(f.job).toMatchObject({ r: "frame", eff: true });
+    // switch to the quick recipes mid-batch, then take it down
+    ok(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, quick: true }));
+    const before = { ...s.inventory };
+    ok(cmd(s, ch, "a", { k: "demolish", x: f.x, y: f.y }));
+    const salvage = (k: "mineral" | "matter"): number => Math.floor((BUILDINGS.factory.cost[k] ?? 0) / 2);
+    expect(s.inventory.mineral - before.mineral).toBe(3 + salvage("mineral"));
+    expect(s.inventory.matter - before.matter).toBe(2 + salvage("matter"));
+  });
+
+  it("refuse a setting whole: a bad field changes nothing", () => {
+    const { s, ch, f } = factoryRoom();
+    stand(s, "a", f.x, f.y);
+    expect(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, recipe: "kit", mode: "careful" }).ok).toBe(false);
+    expect(f.recipe).toBe("auto");
+    expect(cmd(s, ch, "a", { k: "set", mode: ["careful"] as never }).ok).toBe(false);
+    expect(cmd(s, ch, "a", { k: "set", mode: "toString" as never }).ok).toBe(false);
+    expect(s.players.a.mode).toBe("careful");
+  });
+
   it("say what they're missing: inputs, power, and a full output", () => {
     const { s, ch, f } = factoryRoom();
     econ(s, ch, 1);
@@ -1028,5 +1055,13 @@ describe("saved rooms from before the factory chain", () => {
     econ(m, ch, 3);
     expect(m.buildings.find((b) => b.id === 90)!.status).toBe("ok");
     expect(m.econ.computeSupply).toBeGreaterThan(0);
+    // a legacy datacentre cools from the stockpile: a belt carrying coolant into it delivers nothing
+    const dc = m.buildings.find((b) => b.id === 90)!;
+    const beside = touching(m, dc).find((i) => !m.tiles[i].b && m.tiles[i].t === 0 && !m.tiles[i].d && !m.tiles[i].cb)!;
+    const [bx, by] = at(m, beside);
+    m.tiles[beside].bt = { o: "a", d: dirTo([bx, by], footprint(dc).find(([fx, fy]) => Math.abs(fx - bx) + Math.abs(fy - by) === 1)!), q: 0, it: "coolant", n: 1 };
+    econ(m, ch, 3);
+    expect(dc.tank ?? 0).toBe(0);
+    expect(m.tiles[beside].bt!.n).toBe(1);
   });
 });

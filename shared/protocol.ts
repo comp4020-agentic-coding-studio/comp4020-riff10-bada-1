@@ -71,7 +71,7 @@ export interface Building {
   /** factory: pause once this many of the product are in hand (0: no target) */
   target?: number;
   /** factory: the batch in progress, inputs already committed */
-  job?: { r: Recipe; n: number; left: number; eff: boolean };
+  job?: { r: Recipe; n: number; left: number; eff: boolean; in?: Partial<Record<Item, number>> };
   /** harvester mode */
   mode?: HarvestMode;
   /** integer accumulator for half-rate consumption (kits) */
