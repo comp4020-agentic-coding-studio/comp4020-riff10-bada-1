@@ -1146,6 +1146,12 @@ export class Renderer {
     } else if (x >= 0 && y >= 0 && x < s.w && y < s.w) {
       const stroke = this.view.tool === "demolish" ? "#ff8a7a" : this.view.tool === "mark" ? "#ffd27a" : "rgba(255,255,240,0.9)";
       this.poly(this.corners(x, y), "rgba(255,255,255,0.08)", stroke);
+      const t = s.tiles[y * s.w + x];
+      if (this.view.tool === "demolish" && !t.b && (t.bt || t.pp || t.cb || t.pa)) {
+        const [cx, cy] = toScreen(this.cam, ...toWorld(x, y));
+        const kind = t.bt ? "belt" : t.pp ? "pipe" : t.cb ? "cable" : "path";
+        this.label(`take up this ${kind} tile`, cx, cy + 20 * this.cam.zoom, "#ffd1cc", 11);
+      }
     }
   }
 

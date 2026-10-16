@@ -121,7 +121,10 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
   .col-left .left, .col-left .memo, .col-left .lobby-panel, .log { display: none; }
   .bottom { max-width: calc(100vw - 1.2rem); max-height: 34vh; overflow: auto; }
   .bottom .build .cost, .bottom .line .cost { display: none; }
-  .corner-buttons { top: auto; bottom: 12rem; transform: none; }
+  .corner-buttons { top: auto; bottom: calc(34vh + 1.4rem); right: 0.6rem; left: auto; transform: none; flex-direction: row; flex-wrap: wrap; justify-content: flex-end; width: calc(100vw - 1.2rem); }
+  .top-right { max-height: 9rem; overflow: auto; }
+  .corner-buttons .emotes { display: none; }
+  .corner-buttons button { padding: 0.2rem 0.5rem; font-size: 0.78rem; }
 }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .card .title { font-size: 2rem; font-weight: 700; margin: 0; }

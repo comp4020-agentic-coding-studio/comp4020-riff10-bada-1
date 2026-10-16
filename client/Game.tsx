@@ -351,7 +351,12 @@ export default function Game({ room, name }: { room: string; name: string }): Re
         if (t.b) c.send({ k: "tend", x, y });
         break;
       case "demolish":
+        // a building first; otherwise take up the line on the tile (belt, pipe, cable, then path)
         if (t.b) c.send({ k: "demolish", x, y });
+        else {
+          const kind = t.bt ? "belt" : t.pp ? "pipe" : t.cb ? "cable" : t.pa ? "path" : null;
+          if (kind) c.send({ k: "unline", x, y, kind });
+        }
         break;
       case "mark":
         setNaming([x, y]);
@@ -390,9 +395,43 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     view.hover = rendererRef.current?.pick(e.clientX - rect.left, e.clientY - rect.top) ?? null;
     view.keyboardTarget = false;
   };
+  // touch and pen: a tap on open ground walks there (a keyboard isn't the only way to move)
+  const walkRef = useRef<[number, number] | null>(null);
+  useEffect(() => {
+    if (!client) return;
+    const id = setInterval(() => {
+      const goal = walkRef.current;
+      if (!goal) return;
+      const dx = goal[0] - client.me.x;
+      const dy = goal[1] - client.me.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 0.35) {
+        walkRef.current = null;
+        client.me.dx = client.me.dy = 0;
+        client.send({ k: "move", dx: 0, dy: 0 });
+        return;
+      }
+      client.me.dx = dx / d;
+      client.me.dy = dy / d;
+      client.send({ k: "move", dx: dx / d, dy: dy / d });
+    }, 100);
+    return () => clearInterval(id);
+  }, [client]);
+
   const onClick = (e: React.PointerEvent<HTMLCanvasElement>): void => {
     if (e.button !== 0) return;
     onPointer(e);
+    const st = client?.state;
+    if (st && view.hover && view.tool === "harvest" && e.pointerType !== "mouse") {
+      const [hx, hy] = view.hover;
+      const t = hx >= 0 && hy >= 0 && hx < st.w && hy < st.w ? st.tiles[hy * st.w + hx] : undefined;
+      const reach = t && Math.hypot(hx - (client?.me.x ?? 0), hy - (client?.me.y ?? 0)) <= HARVEST_RANGE;
+      if (t && !t.b && !((t.d && t.amt > 0) && reach)) {
+        walkRef.current = [hx, hy];
+        return;
+      }
+    }
+    walkRef.current = null;
     // a tall building is picked by what you see of it, not only its footprint
     if (view.tool === "harvest" || view.tool === "inspect" || view.tool === "demolish") {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -994,13 +1033,13 @@ function Help({ onClose, st }: { onClose: () => void; st: (typeof STAGES)[number
       <div className="card help">
         <h2 id="help-h">How to play</h2>
         <ul>
-          <li><kbd>WASD</kbd> or arrows: walk (faster on a path). Wheel or <kbd>+</kbd>/<kbd>-</kbd>: zoom.</li>
+          <li><kbd>WASD</kbd> or arrows: walk (faster on a path); on a touch screen, tap open ground. Wheel or <kbd>+</kbd>/<kbd>-</kbd>: zoom.</li>
           <li><kbd>E</kbd>/<kbd>Space</kbd> (hold): harvest whatever's in reach, or help raise a building site. <kbd>M</kbd> switches careful (takes 1, wastes nothing) and intensive (takes 2, destroys 1 more).</li>
           <li><kbd>1</kbd>–<kbd>9</kbd>: pick a building. The ghost shows every shortage and why it can't go there. Click, or <kbd>Enter</kbd> for the tile you face. <kbd>Esc</kbd> cancels.</li>
           <li><kbd>F</kbd>: load the factory beside you from the shared stockpile and collect what it made; collect a harvester's hopper or a pump's tank; fill a datacentre's or dome's tank.</li>
           <li><kbd>L</kbd>: lay a line. Click its start, then its end. Cables carry power (a grid only has what its own generators make), pipes carry coolant from a pump, belts carry items toward their arrow, paths are quicker to walk on. <kbd>G</kbd> shows them all.</li>
           <li><kbd>C</kbd>: claim a {CLAIM_SIZE}×{CLAIM_SIZE} plot (up to {CLAIMS_PER_PLAYER}). A datacentre has to sit inside your own claim; nobody else can build or take things down there, but anyone can walk, harvest and connect.</li>
-          <li><kbd>I</kbd> inspect (recipes, upgrades, why it's idle) · <kbd>X</kbd> take down (half back) · <kbd>N</kbd> name a place · <kbd>V</kbd> survey · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
+          <li><kbd>I</kbd> inspect (recipes, upgrades, why it's idle) · <kbd>X</kbd> take down a building or a line tile (half back, plus whatever it held) · <kbd>N</kbd> name a place · <kbd>V</kbd> survey · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
         </ul>
         <p>The chain on every world: gather, house workers, power, a factory, parts, a claim, a datacentre, then harvesters and belts so nobody has to carry everything. Rushing is quicker and wastes more; efficient kits and careful harvesting take setup and last longer.</p>
         <p>The Green Lobby walks the land too, putting stock back from a seed bank that runs out, and picketing datacentre sites for a while.</p>
