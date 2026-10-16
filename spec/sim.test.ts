@@ -1028,6 +1028,22 @@ describe("rushed and sustainable play", () => {
   });
 });
 
+describe("the action log", () => {
+  it("names who did it on every event, even when a field could shadow the name", () => {
+    const { s, ch } = room("rapid", ["a", "b"]);
+    s.inventory = { matter: 50, mineral: 50, coolant: 50 };
+    const [x, y] = freeTile(s, 1);
+    ok(cmd(s, ch, "b", { k: "build", x, y, type: "plaza" }));
+    ok(cmd(s, ch, "a", { k: "demolish", x, y }));
+    const evs = ch.events.filter((e) => e.action === "build" || e.action === "demolish");
+    expect(evs.map((e) => [e.actor, e.name, e.action])).toEqual([
+      ["b", "B", "build"],
+      ["a", "A", "demolish"],
+    ]);
+    expect(evs[1]).toMatchObject({ owner: "b", building: "plaza" });
+  });
+});
+
 describe("saved rooms from before the factory chain", () => {
   it("load with no goods, no claims, zero restored, and their datacentres kept and running", async () => {
     const { migrate } = await import("../server/migrate.ts");

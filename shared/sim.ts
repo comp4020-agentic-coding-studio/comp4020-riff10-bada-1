@@ -666,7 +666,7 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
         s.reserve += def.renderValue;
         s.archive.push({ stage: st.id, name: b.name ?? "A world", fate: `was rendered down for ${def.renderValue} energy` });
         log(s, ch, `${p.name} rendered down ${b.name}.`);
-        ev("render", { building: b.type, id: b.id, name: b.name ?? "", energy: def.renderValue });
+        ev("render", { building: b.type, id: b.id, world: b.name ?? "", energy: def.renderValue });
       } else {
         if (b.owner !== pid && !isHost(s, pid)) return no("only its builder or the host can take this down");
         // lossy salvage: always strictly less than the cost, goods included, so no refund loop

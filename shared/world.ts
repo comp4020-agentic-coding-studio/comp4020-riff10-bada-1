@@ -31,7 +31,8 @@ export function log(s: RoomState, ch: Changes, text: string): void {
 }
 
 export function event(ch: Changes, actor: string, name: string, action: string, fields: Record<string, string | number | boolean> = {}): void {
-  ch.events.push({ actor, name, action, ...fields });
+  // who did it always wins over a field of the same name
+  ch.events.push({ ...fields, actor, name, action });
 }
 
 export const emptyLedger = (): Ledger =>

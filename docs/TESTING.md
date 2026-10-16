@@ -60,7 +60,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 
 **`spec/invariants.test.ts`**, the course's: `/` answers and `/readme/` publishes this README with every heading.
 
-54 tests, all passing locally against a freshly built server.
+55 tests, all passing locally against a freshly built server.
 
 ## Multiplayer playthroughs
 
@@ -80,7 +80,8 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 - **Recovering from a shortage**: the bot's factory sat at "idle: no metal ore (needs 3, has 1)". The browser player walked over and pressed `F`: the server logged the load (`loaded="2 mineral + 1 matter"`) and the factory's next batch three ticks later.
 - **Two browsers, no shared storage**: two separate `agent-browser` sessions joined one room as Ada and Bo. Ada harvested, then claimed a plot with `C` (the ghost read "✓ claim this 4×4"); Bo's browser, pointing a Plaza at it, read "✕ that's Ada's land" on the ghost and in the toast, and the server log told them apart by id and name: `name=Ada action=claim claim=1 x=9 y=8`, then `name=Bo action=refused cmd=build reason="that's Ada's land"`.
 - **Mobile**: at 390×844 the toolbar scrolls, the corner buttons sit above it, and tapping open ground walked the player there.
-- Console clean throughout; a two-bot rapid room was driven from Earth into Mars with a browser watching.
+- Console clean throughout.
+- **A whole live campaign**: a rush bot and a green bot over the real protocol, rapid preset, from Earth to the consumed ending in about 13 minutes, a factory and datacentre on every world, two World Engines rendered down in the Universe when the Bottled Sun ran out. Reading its server log found one narration bug: a render logged the engine's name in place of the player's. Fixed, with a spec that every event names its actor.
 
 ## Visual inspection
 
