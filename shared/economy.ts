@@ -60,7 +60,8 @@ export const within = (s: RoomState, b: Building, radius: number): number[] => {
 export const powerNeed = (b: Building): number => {
   const def = BUILDINGS[b.type];
   if (def.energy >= 0) return 0;
-  return -def.energy + (b.kit && b.type !== "furnace" ? KIT_POWER[b.type] ?? 0 : 0);
+  const kit = b.kit && !(b.type === "factory" && b.quick) ? KIT_POWER[b.type] ?? 0 : 0;
+  return Math.max(0, -def.energy + kit);
 };
 
 /** Buildings that tap the Bottled Sun on its worlds. */
@@ -316,7 +317,12 @@ export function economy(s: RoomState, ch: Changes): void {
   const computeSupply = compute;
   for (const r of of("radiator")) take(r);
 
-  for (const f of of("factory")) factory(s, f, take(f, { pressure }), ch);
+  // a factory with nothing it can make draws nothing: idle machines don't consume as if producing
+  for (const f of of("factory")) {
+    const why = factoryIdle(s, f);
+    if (why) setStatus(f, why, ch);
+    else factory(s, f, take(f, { pressure }), ch);
+  }
 
   const throttled = st.mechanic === "heat" && s.heat >= HEAT_LIMIT;
   let heat = 0;
@@ -447,6 +453,19 @@ export function nextRecipe(s: RoomState, f: Building): { r: Recipe } | { why: st
 
 export const recipeOf = (f: Building, r: Recipe): { in: Partial<Record<Item, number>>; out: number; ticks: number } =>
   f.kit && !f.quick ? RECIPES[r].efficient : RECIPES[r].quick;
+
+/** Why a factory can't do anything this tick (before power is considered), or null. */
+function factoryIdle(s: RoomState, f: Building): string | null {
+  if (f.job) return null;
+  const st = STAGES[s.stage];
+  const next = nextRecipe(s, f);
+  if ("why" in next) return next.why;
+  const rec = recipeOf(f, next.r);
+  if ((f.out?.[next.r] ?? 0) + rec.out > OUTPUT_CAP) return "idle: output full (collect it with F, or belt it to a store)";
+  const missing = Object.entries(rec.in).find(([k, v]) => (f.buf?.[k as Item] ?? 0) < (v ?? 0));
+  if (missing) return `idle: no ${itemLabel(st, missing[0] as Item)} (needs ${missing[1]}, has ${f.buf?.[missing[0] as Item] ?? 0}): load it with F or belt it in`;
+  return null;
+}
 
 function factory(s: RoomState, f: Building, powered: boolean, ch: Changes): void {
   const st = STAGES[s.stage];

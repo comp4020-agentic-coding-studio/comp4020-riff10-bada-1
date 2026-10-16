@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { BUILDINGS, FAMILIES, STAGES } from "../shared/content.ts";
-import type { Building, RoomState } from "../shared/protocol.ts";
-import { routeBetween, touching } from "../shared/layout.ts";
-import { applyCommand, createRoom, join, leave, ledgerHolds, newChanges, tick, totalRemaining, bundleOk, type Changes } from "../shared/sim.ts";
+import { BUILDINGS, CLAIM_SIZE, FAMILIES, LOBBY, PACES, PIPE_LEAK_EVERY, STAGES, type BuildingType, type Pace } from "../shared/content.ts";
+import type { Building, Command, LedgerEntry, RoomState, StageSummary } from "../shared/protocol.ts";
+import { DIRS, claimAt, dirTo, footprint, routeBetween, touching } from "../shared/layout.ts";
+import { applyCommand, bundleOk, claimProblem, createRoom, goodsOk, join, leave, ledgerHolds, newChanges, placementProblem, tick, totalRemaining, type Changes } from "../shared/sim.ts";
+import { complete } from "../shared/world.ts";
+import { decide, newMemory, type Strategy } from "../scripts/brain.ts";
 
 // The authoritative simulation, exercised directly: no browser, no socket.
 
@@ -367,5 +369,613 @@ describe("stage transitions", () => {
     expect(restored.reserve).toBe(s.history.at(-1)!.ledger.matter.extracted * 4);
     expect(JSON.stringify(restored.tiles)).toBe(JSON.stringify(s.tiles));
     expect(restored.history).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The factory chain, claims, networks and the Green Lobby (crit 10's brief).
+
+/** A fresh Earth room with plenty in the stockpile, the lobby sent home, and player a standing at the centre. */
+function stocked(players = ["a"]): { s: RoomState; ch: Changes } {
+  const r = room("rapid", players);
+  r.s.inventory = { matter: 500, mineral: 500, coolant: 500 };
+  r.s.lobby.bank = { matter: 0, mineral: 0, coolant: 0 };
+  r.s.lobby.bankStart = { matter: 0, mineral: 0, coolant: 0 };
+  return r;
+}
+const ok = (r: { ok: boolean }): void => expect(r).toEqual({ ok: true });
+const cmd = (s: RoomState, ch: Changes, pid: string, c: Command) => applyCommand(s, pid, id(), s.gen, c, ch);
+const econ = (s: RoomState, ch: Changes, n = 1): void => {
+  for (let i = 0; i < n * PACES[s.pace].econEvery; i++) tick(s, ch);
+};
+/** Build and finish a building at a free spot near player a; returns it. */
+function put(s: RoomState, ch: Changes, type: BuildingType, pid = "a", eff = false, at?: [number, number]): Building {
+  let spot = at;
+  if (!spot) {
+    try {
+      spot = freeTile(s, BUILDINGS[type].size + 2).map((v) => v + 1) as [number, number];
+    } catch {
+      spot = freeTile(s, BUILDINGS[type].size);
+    }
+  }
+  const [x, y] = spot;
+  stand(s, pid, x, y);
+  const r = cmd(s, ch, pid, { k: "build", x, y, type, eff });
+  expect(r).toEqual({ ok: true });
+  const b = s.buildings.find((q) => q.x === x && q.y === y)!;
+  b.work = b.need ?? BUILDINGS[type].build * 10;
+  return b;
+}
+/** A powered, staffed factory: homes, a Sun Garden, cables. */
+function factoryRoom(): { s: RoomState; ch: Changes; f: Building } {
+  const { s, ch } = stocked();
+  const home = put(s, ch, "city");
+  const sun = put(s, ch, "solar");
+  const f = put(s, ch, "factory");
+  cable(s, ch, "a", sun, f);
+  cable(s, ch, "a", home, f);
+  econ(s, ch, 2);
+  return { s, ch, f };
+}
+const claimFor = (s: RoomState, ch: Changes, pid: string): [number, number] => {
+  for (let y = 0; y + CLAIM_SIZE <= s.w; y++)
+    for (let x = 0; x + CLAIM_SIZE <= s.w; x++) {
+      stand(s, pid, x + 1.5, y + 1.5);
+      if (claimProblem(s, x, y, s.players[pid]) !== null) continue;
+      let clear = true;
+      for (let dy = 1; dy <= 2; dy++) for (let dx = 1; dx <= 2; dx++) {
+        const t = s.tiles[(y + dy) * s.w + x + dx];
+        if (t.t !== 0 || t.b || (t.d && t.amt > 0)) clear = false;
+      }
+      if (!clear) continue;
+      ok(cmd(s, ch, pid, { k: "claim", x, y }));
+      return [x, y];
+    }
+  throw new Error("nowhere to claim");
+};
+
+describe("the datacentre is earned", () => {
+  it("is refused without goods, outside a claim, and on someone else's claim", () => {
+    const { s, ch } = stocked(["a", "b"]);
+    const [cx, cy] = claimFor(s, ch, "a");
+    stand(s, "a", cx + 1, cy + 1);
+    expect(cmd(s, ch, "a", { k: "build", x: cx + 1, y: cy + 1, type: "datacentre" })).toEqual({ ok: false, reason: "needs 6 wire (have 0)" });
+    s.goods = { wire: 12, frame: 4, kit: 0 };
+    // outside any claim
+    const [fx, fy] = freeTile(s, 4);
+    const outside = claimAt(s, fx + 1, fy + 1) ? null : [fx + 1, fy + 1];
+    if (outside) {
+      stand(s, "a", outside[0], outside[1]);
+      expect(cmd(s, ch, "a", { k: "build", x: outside[0], y: outside[1], type: "datacentre" }).ok).toBe(false);
+      expect(placementProblem(s, "datacentre", outside[0], outside[1], s.players.a)).toMatch(/claim this ground first/);
+    }
+    // someone else's
+    stand(s, "b", cx + 1, cy + 1);
+    expect(cmd(s, ch, "b", { k: "build", x: cx + 1, y: cy + 1, type: "datacentre" })).toEqual({ ok: false, reason: "that's A's land" });
+    // the owner, with the parts
+    stand(s, "a", cx + 1, cy + 1);
+    ok(cmd(s, ch, "a", { k: "build", x: cx + 1, y: cy + 1, type: "datacentre" }));
+    expect(s.goods).toMatchObject({ wire: 6, frame: 2 });
+  });
+
+  it("is reachable on every world from the starter crate, with no compute and no goods to begin with", () => {
+    for (let stage = 0; stage < STAGES.length; stage++) {
+      const s = createRoom("BOOTS", 11, "rapid");
+      const ch = newChanges();
+      join(s, "a", "t", "A", ch);
+      join(s, "b", "t2", "B", ch);
+      while (s.stage < stage) {
+        for (const t of s.tiles) if (t.d && t.amt) {
+          s.ledger[t.d].remaining -= t.amt;
+          s.ledger[t.d].extracted += t.amt;
+          t.amt = 0;
+        }
+        tick(s, ch);
+        while (s.phase.k === "transition") tick(s, ch);
+      }
+      if (STAGES[stage].energySource === "bottled") s.reserve = 1500;
+      expect(s.goods).toEqual({ wire: 0, frame: 0, kit: 0 });
+      expect(s.econ.computeSupply).toBe(0);
+      const mem = { a: newMemory(), b: newMemory() };
+      while (s.stage === stage && s.phase.k === "play" && !s.buildings.some((b) => b.type === "datacentre" && b.owner && complete(b)) && s.tick < 30_000) {
+        if (s.tick % 8 === 0) for (const pid of ["a", "b"] as const) for (const c of decide(s, pid, "rush", mem[pid])) applyCommand(s, pid, id(), s.gen, c, ch);
+        tick(s, ch);
+        expect(ledgerHolds(s)).toBe(true);
+      }
+      const where = `${STAGES[stage].id}`;
+      expect(s.buildings.some((b) => b.type === "factory" && complete(b)), where).toBe(true);
+      expect(s.buildings.some((b) => b.type === "datacentre" && b.owner && complete(b)), where).toBe(true);
+    }
+  });
+});
+
+describe("factories", () => {
+  it("turn ore into wire from their own input buffer, and the natural ledger doesn't move", () => {
+    const { s, ch, f } = factoryRoom();
+    const before = structuredClone(s.ledger);
+    const ore = s.inventory.mineral;
+    stand(s, "a", f.x, f.y);
+    ok(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, recipe: "wire" }));
+    ok(cmd(s, ch, "a", { k: "tend", x: f.x, y: f.y }));
+    expect(s.inventory.mineral).toBe(ore - f.buf!.mineral!);
+    econ(s, ch, 1);
+    expect(f.status).toBe("making wire");
+    econ(s, ch, 3);
+    expect(f.out!.wire).toBeGreaterThan(0);
+    ok(cmd(s, ch, "a", { k: "tend", x: f.x, y: f.y }));
+    expect(s.goods.wire).toBeGreaterThan(0);
+    expect(s.ledger).toEqual(before);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("consume exactly their recipe, and switching, reconnecting or a save/load never duplicates a batch", () => {
+    const { s, ch, f } = factoryRoom();
+    stand(s, "a", f.x, f.y);
+    ok(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, recipe: "frame" }));
+    f.buf = { mineral: 4, matter: 3 };
+    econ(s, ch, 1);
+    expect(f.job).toMatchObject({ r: "frame", n: 1 });
+    expect(f.buf).toMatchObject({ mineral: 0, matter: 0 });
+    // switch mid-batch: the committed batch finishes as started, nothing refunded or doubled
+    ok(cmd(s, ch, "a", { k: "set", x: f.x, y: f.y, recipe: "wire" }));
+    leave(s, "a", ch);
+    join(s, "a", "tok-a", "A", ch);
+    const saved = JSON.parse(JSON.stringify(s)) as RoomState;
+    econ(s, ch, 3);
+    econ(saved, newChanges(), 3);
+    for (const r of [s, saved]) {
+      const g = r.buildings.find((q) => q.id === f.id)!;
+      expect((g.out!.frame ?? 0) + r.goods.frame).toBe(1);
+      expect(g.out!.wire ?? 0).toBe(0);
+    }
+  });
+
+  it("say what they're missing: inputs, power, and a full output", () => {
+    const { s, ch, f } = factoryRoom();
+    econ(s, ch, 1);
+    expect(f.status).toMatch(/^idle: no metal ore/);
+    f.buf = { mineral: 12 };
+    f.out = { wire: 12 };
+    f.recipe = "wire";
+    econ(s, ch, 1);
+    expect(f.status).toMatch(/output full/);
+    f.out = {};
+    const cableTiles = s.tiles.map((t, i) => (t.cb ? i : -1)).filter((i) => i >= 0);
+    for (const i of cableTiles) delete s.tiles[i].cb;
+    econ(s, ch, 1);
+    expect(f.status).toMatch(/no power: not cabled/);
+  });
+
+  it("with a kit, make more parts from the same ore than without, more slowly", () => {
+    const run = (kit: boolean): { wire: number; ticks: number } => {
+      const { s, ch, f } = factoryRoom();
+      f.kit = kit;
+      f.recipe = "wire";
+      f.buf = { mineral: 12 };
+      let n = 0;
+      while ((f.buf.mineral ?? 0) >= 3 || f.job) {
+        econ(s, ch, 1);
+        n++;
+      }
+      return { wire: f.out!.wire ?? 0, ticks: n };
+    };
+    const quick = run(false);
+    const eff = run(true);
+    expect(eff.wire).toBeGreaterThan(quick.wire);
+    expect(eff.ticks).toBeGreaterThan(quick.ticks);
+  });
+});
+
+describe("claims", () => {
+  it("never block walking or a hand harvest, and never capture someone else's building", () => {
+    const { s, ch } = stocked(["a", "b"]);
+    // b's building first; a's claim can't swallow it
+    const plaza = put(s, ch, "plaza", "b");
+    stand(s, "a", plaza.x, plaza.y);
+    expect(claimProblem(s, plaza.x - 1, plaza.y - 1, s.players.a)).toMatch(/B's: claim around it/);
+    // a claim over a deposit: b still harvests it
+    const dep = s.tiles.findIndex((t, i) => t.d && t.amt > 0 && t.t === 0 && i % s.w > 1 && i % s.w < s.w - 3 && Math.floor(i / s.w) > 1 && Math.floor(i / s.w) < s.w - 3);
+    const [dx, dy] = at(s, dep);
+    stand(s, "a", dx, dy);
+    let claimed = false;
+    for (const [ox, oy] of [[1, 1], [0, 0], [2, 2], [1, 0], [0, 1]]) if (!claimed && !claimProblem(s, dx - ox, dy - oy, s.players.a)) {
+      ok(cmd(s, ch, "a", { k: "claim", x: dx - ox, y: dy - oy }));
+      claimed = true;
+    }
+    expect(claimed).toBe(true);
+    stand(s, "b", dx, dy);
+    const amt = s.tiles[dep].amt;
+    ok(cmd(s, ch, "b", { k: "harvest", x: dx, y: dy }));
+    expect(s.tiles[dep].amt).toBeLessThan(amt);
+    // and walking across it is just walking
+    s.players.b.x = dx;
+    s.players.b.y = dy;
+    ok(cmd(s, ch, "b", { k: "move", dx: 1, dy: 0 }));
+    tick(s, ch);
+    expect(s.players.b.x).toBeGreaterThan(dx);
+    // but b can't build on it; the host can give it up
+    s.hostId = "b";
+    ok(cmd(s, ch, "b", { k: "unclaim", x: dx, y: dy }));
+    expect(s.claims).toHaveLength(0);
+  });
+
+  it("are capped per player", () => {
+    const { s, ch } = stocked();
+    claimFor(s, ch, "a");
+    claimFor(s, ch, "a");
+    expect(() => claimFor(s, ch, "a")).toThrow();
+  });
+});
+
+describe("salvage and refunds", () => {
+  it("returns strictly less than the cost, goods and kits included, and buffers exactly once", () => {
+    const { s, ch } = stocked();
+    s.goods = { wire: 20, frame: 10, kit: 2 };
+    const [cx, cy] = claimFor(s, ch, "a");
+    const dc = put(s, ch, "datacentre", "a", true, [cx + 1, cy + 1]);
+    ok(cmd(s, ch, "a", { k: "tend", x: dc.x, y: dc.y }));
+    const tank = dc.tank!;
+    expect(tank).toBeGreaterThan(0);
+    const before = { ...s.inventory, ...s.goods };
+    ok(cmd(s, ch, "a", { k: "demolish", x: dc.x, y: dc.y }));
+    const cost = { ...BUILDINGS.datacentre.cost } as Record<string, number>;
+    for (const [k, v] of Object.entries({ wire: 2, frame: 1 })) cost[k] = (cost[k] ?? 0) + v;
+    for (const [k, v] of Object.entries(cost)) {
+      const back = (k in s.goods ? s.goods[k as "wire"] : s.inventory[k as "matter"]) - (before as Record<string, number>)[k];
+      expect(back - (k === "coolant" ? tank : 0)).toBeLessThan(v);
+    }
+    expect(s.inventory.coolant - before.coolant).toBe(tank);
+    // a kit fitted later is part of what was paid, and it comes back at less than one
+    const f = put(s, ch, "factory");
+    ok(cmd(s, ch, "a", { k: "upgrade", x: f.x, y: f.y }));
+    const kits = s.goods.kit;
+    ok(cmd(s, ch, "a", { k: "demolish", x: f.x, y: f.y }));
+    expect(s.goods.kit).toBe(kits);
+  });
+});
+
+describe("harvesting", () => {
+  it("intensive is faster but destroys real stock; careful takes less and wastes nothing, down to the last units", () => {
+    const run = (mode: "careful" | "intensive"): { got: number; destroyed: number } => {
+      const { s, ch } = room("normal");
+      s.lobby.bank = { matter: 0, mineral: 0, coolant: 0 };
+      s.lobby.bankStart = { matter: 0, mineral: 0, coolant: 0 };
+      ok(cmd(s, ch, "a", { k: "set", mode }));
+      const i = depositIdx(s);
+      const [x, y] = at(s, i);
+      stand(s, "a", x, y);
+      const f = s.tiles[i].d!;
+      for (let k = 0; k < 5; k++) {
+        s.players.a.nextHarvest = 0;
+        cmd(s, ch, "a", { k: "harvest", x, y });
+      }
+      expect(ledgerHolds(s)).toBe(true);
+      return { got: s.inventory[f], destroyed: s.ledger[f].destroyed };
+    };
+    const careful = run("careful");
+    const intensive = run("intensive");
+    expect(intensive.got).toBeGreaterThan(careful.got);
+    expect(intensive.destroyed).toBeGreaterThan(0);
+    expect(careful.destroyed).toBe(0);
+    // with one or two units left, both can take what's there; intensive wastes only what's left over
+    for (const [left, mode, got, lost] of [[1, "intensive", 1, 0], [2, "intensive", 2, 0], [2, "careful", 1, 0], [1, "careful", 1, 0]] as const) {
+      const { s, ch } = room("normal");
+      const i = depositIdx(s);
+      const t = s.tiles[i];
+      s.ledger[t.d!].remaining -= t.amt - left;
+      s.ledger[t.d!].extracted += t.amt - left;
+      t.amt = left;
+      ok(cmd(s, ch, "a", { k: "set", mode }));
+      const [x, y] = at(s, i);
+      stand(s, "a", x, y);
+      const inv = s.inventory[t.d!];
+      ok(cmd(s, ch, "a", { k: "harvest", x, y }));
+      expect(s.inventory[t.d!] - inv).toBe(got);
+      expect(s.ledger[t.d!].destroyed).toBe(lost);
+      expect(ledgerHolds(s)).toBe(true);
+    }
+  });
+});
+
+describe("networks", () => {
+  it("a disconnected machine draws no power from anywhere, and an empty tank idles a datacentre", () => {
+    const { s, ch } = stocked();
+    s.goods = { wire: 12, frame: 4, kit: 0 };
+    put(s, ch, "furnace");
+    put(s, ch, "city");
+    const [cx, cy] = claimFor(s, ch, "a");
+    const dc = put(s, ch, "datacentre", "a", false, [cx + 1, cy + 1]);
+    econ(s, ch, 2);
+    expect(dc.status).toBe("idle: no power: not cabled to a generator");
+    expect(s.econ.unwired).toBeGreaterThan(0);
+    cable(s, ch, "a", s.buildings.find((b) => b.type === "furnace")!, dc);
+    cable(s, ch, "a", s.buildings.find((b) => b.type === "city")!, dc);
+    econ(s, ch, 2);
+    expect(dc.status).toMatch(/tank empty/);
+    expect(s.econ.computeSupply).toBe(0);
+    dc.tank = 5;
+    econ(s, ch, 1);
+    expect(dc.status).toBe("ok");
+  });
+
+  it("pipes move coolant from a pump to a tank and cheap pipe leaks exactly by its counter", () => {
+    const { s, ch } = stocked();
+    const pond = s.tiles.findIndex((t) => t.d === "coolant" && t.amt > 0);
+    const [px, py] = at(s, pond);
+    // a pump beside the pond, on dry ground
+    let spot: [number, number] | null = null;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [2, 0], [0, 2], [-2, 0], [0, -2]]) {
+      const t = s.tiles[(py + dy) * s.w + px + dx];
+      if (!spot && t && t.t === 0 && !t.d && !t.b && Math.abs(dx) + Math.abs(dy) === 1) spot = [px + dx, py + dy];
+    }
+    if (!spot) for (let i = 0; i < s.tiles.length && !spot; i++) {
+      const x = i % s.w, y = Math.floor(i / s.w);
+      const t = s.tiles[i];
+      if (t.t === 0 && !t.d && !t.b && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => s.tiles[(y + dy) * s.w + x + dx]?.d === "coolant")) spot = [x, y];
+    }
+    const pump = put(s, ch, "intake", "a", false, spot!);
+    const sun = put(s, ch, "solar");
+    cable(s, ch, "a", sun, pump);
+    put(s, ch, "city");
+    s.goods = { wire: 12, frame: 4, kit: 0 };
+    const [cx, cy] = claimFor(s, ch, "a");
+    const dc = put(s, ch, "datacentre", "a", false, [cx + 1, cy + 1]);
+    cable(s, ch, "a", pump, dc, "pipe");
+    const pipeTiles = s.tiles.filter((t) => t.pp).length;
+    const coolantBefore = s.ledger.coolant.extracted;
+    for (let k = 0; k < 40; k++) {
+      econ(s, ch, 1);
+      expect(ledgerHolds(s)).toBe(true);
+    }
+    expect(dc.tank).toBeGreaterThan(0);
+    const pumped = s.ledger.coolant.extracted - coolantBefore;
+    const inTanks = (pump.tank ?? 0) + (dc.tank ?? 0);
+    // what was pumped is in a tank, was drunk, or leaked: nothing appears or vanishes
+    expect(inTanks + s.ops.coolantLost).toBe(pumped);
+    expect(s.ops.coolantLost).toBe(Math.floor((s.leak + s.ops.coolantLost * PIPE_LEAK_EVERY) / PIPE_LEAK_EVERY));
+    expect(pipeTiles).toBeGreaterThan(0);
+  });
+
+  it("belts carry whole items, stop when full, and conserve them through forks and merges", () => {
+    const { s, ch } = stocked();
+    const store = put(s, ch, "store");
+    const free = touching(s, store).filter((i) => !s.tiles[i].b && s.tiles[i].t === 0 && !s.tiles[i].d);
+    // a belt three tiles long ending at the store
+    const end = free[0];
+    const ex = end % s.w;
+    const ey = Math.floor(end / s.w);
+    const toStore = dirTo([ex, ey], [store.x, store.y]);
+    const back: [number, number] = [ex - DIRS[toStore][0], ey - DIRS[toStore][1]];
+    const back2: [number, number] = [back[0] - DIRS[toStore][0], back[1] - DIRS[toStore][1]];
+    stand(s, "a", ex, ey);
+    ok(cmd(s, ch, "a", { k: "line", kind: "belt", q: 0, path: [back2, back, [ex, ey]], d: toStore }));
+    // load the far end by hand (as a harvester would) and watch it arrive, a tile per tick
+    s.tiles[back2[1] * s.w + back2[0]].bt!.it = "mineral";
+    s.tiles[back2[1] * s.w + back2[0]].bt!.n = 1;
+    const inv = s.inventory.mineral;
+    econ(s, ch, 1);
+    expect(s.inventory.mineral).toBe(inv);
+    econ(s, ch, 2);
+    expect(s.inventory.mineral).toBe(inv + 1);
+    // a belt into nothing blocks, and keeps its item
+    const t = s.tiles[ey * s.w + ex];
+    t.bt!.d = ((toStore + 2) % 4) as 0 | 1 | 2 | 3;
+    t.bt!.it = "matter";
+    t.bt!.n = 1;
+    s.tiles[back[1] * s.w + back[0]].bt!.it = "matter";
+    s.tiles[back[1] * s.w + back[0]].bt!.n = 1;
+    const held = (): number => s.tiles.reduce((a, q) => a + (q.bt?.n ?? 0), 0) + s.inventory.matter;
+    const total = held();
+    for (let k = 0; k < 5; k++) econ(s, ch, 1);
+    expect(held()).toBe(total);
+    // taking a loaded belt up returns its load once, separately from salvage
+    const mat = s.inventory.matter;
+    const load = t.bt!.n;
+    ok(cmd(s, ch, "a", { k: "unline", x: ex, y: ey, kind: "belt" }));
+    expect(s.inventory.matter).toBe(mat + load + 0);
+  });
+});
+
+describe("the Green Lobby", () => {
+  it("replants a harvested tile, caps what it puts back per family, and goes home when the bank runs dry", () => {
+    const { s, ch } = room("rapid");
+    const bank0 = { ...s.lobby.bankStart };
+    expect(bank0.matter).toBeGreaterThan(0);
+    // harvest a grove half down by hand, then let the lobby work
+    const i = s.tiles.findIndex((t) => t.d === "matter" && t.amt > 0);
+    const t = s.tiles[i];
+    const took = Math.floor(t.amt / 2);
+    t.amt -= took;
+    s.ledger.matter.remaining -= took;
+    s.ledger.matter.extracted += took;
+    // the log line comes when a visit ends, with the amount put back
+    for (let k = 0; k < 1000 && !ch.events.some((e) => e.action === "lobby_restore"); k++) {
+      tick(s, ch);
+      expect(ledgerHolds(s)).toBe(true);
+    }
+    expect(s.ledger.matter.restored).toBeGreaterThan(0);
+    const ev = ch.events.find((e) => e.action === "lobby_restore")!;
+    expect(ev).toMatchObject({ family: "matter", x: i % s.w, y: Math.floor(i / s.w) });
+    expect(LOBBY.names).toContain(ev.name);
+    // strip the island so there is plenty to replant, then let the bank empty
+    for (const q of s.tiles) if (q.d && q.amt > 1) {
+      const k = q.amt - 1;
+      q.amt = 1;
+      s.ledger[q.d].remaining -= k;
+      s.ledger[q.d].extracted += k;
+    }
+    for (let k = 0; k < 20000 && !s.lobby.spent; k++) {
+      tick(s, ch);
+      expect(ledgerHolds(s)).toBe(true);
+    }
+    expect(s.lobby.spent).toBe(true);
+    expect(s.lobby.agents).toHaveLength(0);
+    for (const f of FAMILIES) {
+      expect(s.ledger[f].restored).toBe(bank0[f]);
+      expect(s.lobby.bank[f]).toBe(0);
+    }
+  });
+
+  it("pickets a datacentre site for a bounded while, and the site still finishes", () => {
+    const { s, ch } = room("rapid");
+    s.inventory = { matter: 500, mineral: 500, coolant: 500 };
+    s.goods = { wire: 12, frame: 4, kit: 0 };
+    const [cx, cy] = claimFor(s, ch, "a");
+    stand(s, "a", cx + 1, cy + 1);
+    ok(cmd(s, ch, "a", { k: "build", x: cx + 1, y: cy + 1, type: "datacentre" }));
+    const dc = s.buildings.find((b) => b.type === "datacentre")!;
+    for (let k = 0; k < 4000 && !complete(dc); k++) tick(s, ch);
+    expect(complete(dc)).toBe(true);
+    expect(dc.picket ?? 0).toBeLessThanOrEqual(LOBBY.picketTicks);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("never stops a world from ending, and stops the moment it does", () => {
+    const { s, ch } = room("rapid", ["a"]);
+    while (s.phase.k === "play" && s.tick < 60_000) {
+      harvestBot(s, ch, "a");
+      tick(s, ch);
+      expect(ledgerHolds(s)).toBe(true);
+    }
+    expect(s.phase.k).toBe("transition");
+    expect(s.lobby.agents).toHaveLength(0);
+    const sum = s.history[0];
+    for (const f of FAMILIES) expect(sum.ledger[f].remaining).toBe(0);
+    expect(FAMILIES.some((f) => sum.ledger[f].restored > 0)).toBe(true);
+  });
+});
+
+describe("rushed and sustainable play", () => {
+  /** One Earth, two bots of a strategy, until it's spent; returns what it measured. */
+  function earth(strat: Strategy, pace: Pace = "normal") {
+    const s = createRoom("STRAT", 7, pace);
+    const ch = newChanges();
+    join(s, "a", "ta", "A", ch);
+    join(s, "b", "tb", "B", ch);
+    const mem = { a: newMemory(), b: newMemory() };
+    while (s.stage === 0 && s.phase.k === "play" && s.tick < 80_000) {
+      if (s.tick % 8 === 0) for (const pid of ["a", "b"] as const) for (const c of decide(s, pid, strat, mem[pid])) applyCommand(s, pid, id(), s.gen, c, ch);
+      tick(s, ch);
+      ch.events.length = 0;
+    }
+    expect(ledgerHolds(s)).toBe(true);
+    return { h: s.history[0], s };
+  }
+
+  it("the rush reaches compute sooner and wastes more; the sustainable route gets more useful work from the same world", () => {
+    const rush = earth("rush");
+    const green = earth("green");
+    const sum = (h: StageSummary, k: "extracted" | "destroyed") => FAMILIES.reduce((a, f) => a + h.ledger[f][k], 0);
+    // both walked the chain: factory, datacentre, automation
+    for (const r of [rush, green]) {
+      expect(r.h.ops!.firstFactory).not.toBeNull();
+      expect(r.h.ops!.firstDatacentre).not.toBeNull();
+      expect(r.h.ops!.firstAutomation).not.toBeNull();
+    }
+    expect(rush.h.ops!.firstDatacentre!).toBeLessThan(green.h.ops!.firstDatacentre!);
+    expect(sum(rush.h, "destroyed")).toBeGreaterThan(sum(green.h, "destroyed") * 5);
+    expect(sum(green.h, "extracted")).toBeGreaterThan(sum(rush.h, "extracted"));
+    // and the green machine stays useful for longer
+    expect(green.h.ops!.busy).toBeGreaterThan(rush.h.ops!.busy);
+    // the rush never bought an efficiency kit
+    expect(rush.s.buildings.some((b) => b.kit)).toBe(false);
+  }, 60_000);
+
+  it("both strategies finish a whole campaign, the books balancing on every tick", () => {
+    for (const strat of ["rush", "green"] as const) {
+      const s = createRoom("CAMPN", 7, "rapid");
+      const ch = newChanges();
+      join(s, "a", "ta", "A", ch);
+      join(s, "b", "tb", "B", ch);
+      let mem = { a: newMemory(), b: newMemory() };
+      let gen = s.gen;
+      while (s.phase.k !== "ended" && s.tick < 400_000) {
+        if (s.phase.k === "play" && s.tick % 8 === 0) for (const pid of ["a", "b"] as const) for (const c of decide(s, pid, strat, mem[pid])) applyCommand(s, pid, id(), s.gen, c, ch);
+        tick(s, ch);
+        ch.events.length = 0;
+        if (s.gen !== gen) {
+          gen = s.gen;
+          mem = { a: newMemory(), b: newMemory() };
+        }
+        expect(ledgerHolds(s)).toBe(true);
+        expect(bundleOk(s.inventory) && goodsOk(s)).toBe(true);
+      }
+      expect(s.phase).toEqual({ k: "ended", how: "consumed" });
+      expect(s.history.map((h) => h.stage)).toEqual(STAGES.map((st) => st.id));
+      // every world got a datacentre built through the chain
+      for (const h of s.history) expect(h.ops!.firstDatacentre, `${strat} ${h.stage}`).not.toBeNull();
+    }
+  }, 120_000);
+
+  it("an equal Bottled Sun makes more parts through an efficient factory before it runs out", () => {
+    const run = (kit: boolean): number => {
+      const { s, ch } = stocked();
+      while (STAGES[s.stage].id !== "system") {
+        for (const t of s.tiles) if (t.d && t.amt) {
+          s.ledger[t.d].remaining -= t.amt;
+          s.ledger[t.d].extracted += t.amt;
+          t.amt = 0;
+        }
+        tick(s, ch);
+        while (s.phase.k === "transition") tick(s, ch);
+      }
+      s.inventory = { matter: 500, mineral: 500, coolant: 500 };
+      s.reserve = 120;
+      const depot = s.buildings.find((b) => b.type === "depot")!;
+      stand(s, "a", depot.x, depot.y + 2);
+      const home = put(s, ch, "city");
+      const f = put(s, ch, "factory");
+      cable(s, ch, "a", depot, f);
+      cable(s, ch, "a", home, f);
+      f.kit = kit;
+      f.recipe = "wire";
+      // a factory with a full output draws nothing: idle machines leave the reserve alone
+      f.out = { wire: 12 };
+      const held = s.reserve;
+      econ(s, ch, 5);
+      expect(s.reserve).toBe(held);
+      f.out = {};
+      for (let k = 0; k < 2000 && s.reserve > 0; k++) {
+        f.buf = { mineral: 12 };
+        f.out = {};
+        econ(s, ch, 1);
+      }
+      expect(s.reserve).toBe(0);
+      return f.made ?? 0;
+    };
+    const quick = run(false);
+    const efficient = run(true);
+    expect(quick).toBeGreaterThan(0);
+    expect(efficient).toBeGreaterThan(quick);
+  });
+});
+
+describe("saved rooms from before the factory chain", () => {
+  it("load with no goods, no claims, zero restored, and their datacentres kept and running", async () => {
+    const { migrate } = await import("../server/migrate.ts");
+    const { s, ch } = room("rapid");
+    // what a schema-1 room looked like: no goods, claims, lobby, ops, restored, mode
+    const old = JSON.parse(JSON.stringify(s)) as Record<string, unknown> & RoomState;
+    old.v = 1;
+    for (const f of FAMILIES) delete (old.ledger[f] as Partial<LedgerEntry>).restored;
+    for (const k of ["goods", "claims", "nextClaimId", "lobby", "ops", "leak"]) delete old[k];
+    delete (old.econ as Partial<RoomState["econ"]>).unwired;
+    delete (old.econ as Partial<RoomState["econ"]>).drawn;
+    for (const p of Object.values(old.players)) delete (p as Partial<typeof p>).mode;
+    const [x, y] = freeTile(old, 2);
+    old.inventory = { matter: 50, mineral: 50, coolant: 50 };
+    old.buildings.push({ id: 90, type: "datacentre", x, y, owner: "a", work: 60, status: "ok" });
+    old.buildings.push({ id: 91, type: "city", x: x, y: y + 3, owner: "a", work: 50, status: "ok" });
+    old.buildings.push({ id: 92, type: "solar", x: x + 3, y: y, owner: "a", work: 40, status: "ok" });
+    for (const b of old.buildings) for (const [fx, fy] of footprint(b)) if (old.tiles[fy * old.w + fx]) old.tiles[fy * old.w + fx].b = b.id;
+    const m = migrate(old, 1);
+    expect(m.goods).toEqual({ wire: 0, frame: 0, kit: 0 });
+    expect(m.claims).toEqual([]);
+    for (const f of FAMILIES) expect(m.ledger[f].restored).toBe(0);
+    expect(m.buildings.find((b) => b.id === 90)?.type).toBe("datacentre");
+    expect(ledgerHolds(m)).toBe(true);
+    econ(m, ch, 3);
+    expect(m.buildings.find((b) => b.id === 90)!.status).toBe("ok");
+    expect(m.econ.computeSupply).toBeGreaterThan(0);
   });
 });

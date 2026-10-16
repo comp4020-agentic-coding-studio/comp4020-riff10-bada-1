@@ -879,7 +879,7 @@ function Inspect({ s, b, youId, host, send, onClose }: { s: Snapshot; b: Buildin
   const io: string[] = [];
   const pw = powerNeed(b);
   if (def.energy > 0) io.push(`+${b.type === "solar" ? def.energy * st.solarScale : def.energy - (b.kit ? KIT_POWER.furnace ?? 0 : 0)} power${b.type === "furnace" ? `, burns ${b.kit ? "1 every other tick" : "1"} ${st.families.matter.label}, only when its grid needs it` : ""}`);
-  if (pw) io.push(`uses ${pw} power${b.kit && KIT_POWER[b.type] ? ` (${KIT_POWER[b.type]} for the kit)` : ""}`);
+  if (pw) io.push(`uses ${pw} power${b.kit && KIT_POWER[b.type] && b.type !== "furnace" && !b.quick ? " (1 less with the kit)" : ""}, only while working`);
   if (def.workers) io.push(def.workers > 0 ? `houses ${def.workers}, ${def.workers + 3} served` : `employs ${-def.workers}`);
   if (def.compute) io.push(def.compute > 0 ? `+${def.compute} compute` : `uses ${-def.compute} compute`);
   if (def.coolantUse) io.push(`drinks ${b.kit ? "1 every other tick" : def.coolantUse} ${st.families.coolant.label} from its tank`);

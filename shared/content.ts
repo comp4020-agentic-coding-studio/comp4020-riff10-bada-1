@@ -209,7 +209,7 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     compute: 0,
     heat: 2,
     tall: true,
-    kit: "unlocks efficient recipes: more parts from the same ore, more slowly",
+    kit: "unlocks efficient recipes: more parts from the same ore and 1 less power, more slowly",
     blurb: "Turns raw stock into parts. Load it by hand (F) or feed it with belts. Needs power and workers, never compute.",
   },
   store: {
@@ -252,8 +252,12 @@ export const INTAKE_TANK = 20;
 export const INTAKE_RATE = 2;
 /** how close a player stands to load, fill or collect from a machine (F) */
 export const TEND_RANGE = 3;
-/** extra power a kit costs to run (its trade-off), or for a furnace, power it gives up */
-export const KIT_POWER: Partial<Record<BuildingType, number>> = { extractor: 1, datacentre: 1, habitat: 1, furnace: 1 };
+/**
+ * How a kit changes a building's power: a furnace gives up power for its cleaner burn; a
+ * factory on its efficient recipes runs slower motors and draws less. Everywhere else
+ * a kit's price is the parts it costs.
+ */
+export const KIT_POWER: Partial<Record<BuildingType, number>> = { furnace: 1, factory: -1 };
 
 /** Networks laid tile by tile. q 0 is cheap, q 1 the efficient version. */
 export type LineKind = "cable" | "pipe" | "belt" | "path";

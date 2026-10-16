@@ -281,3 +281,44 @@ describe("persistence", () => {
     await stop(p, "SIGTERM");
   }, 45_000);
 });
+
+describe("the action log", () => {
+  it("prints who did what, players and the Green Lobby alike, and never a token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "plenty-log-"));
+    const port = 19000 + Math.floor(Math.random() * 1000);
+    const url = `http://localhost:${port}`;
+    const p = spawn(process.execPath, ["server/main.ts"], { env: { ...process.env, PORT: String(port), DATA_DIR: dir }, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    p.stdout!.on("data", (d) => (out += d.toString()));
+    try {
+      for (let i = 0; i < 100; i++) {
+        try {
+          await fetch(new URL("/api/health", url));
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      const room = await newRoom(url, "rapid");
+      const a = await joined(url, room, "Ada");
+      const b = await joined(url, room, "Bo");
+      a.cmd({ k: "set", mode: "intensive" });
+      a.cmd({ k: "emote", e: "wave" });
+      await a.until((m) => m.t === "ack");
+      // the lobby arrives on the first economy tick
+      await new Promise((r) => setTimeout(r, 1500));
+      const lines = out.split("\n").filter((l) => l.includes(`room=${room}`));
+      expect(lines.some((l) => l.includes(`actor=${a.you}`) && l.includes("name=Ada") && l.includes("action=join"))).toBe(true);
+      expect(lines.some((l) => l.includes(`actor=${b.you}`) && l.includes("name=Bo") && l.includes("action=join"))).toBe(true);
+      expect(lines.some((l) => l.includes("name=Ada") && l.includes("action=mode") && l.includes("harvest=intensive"))).toBe(true);
+      expect(lines.some((l) => /actor=lobby:\w+ name=\w+ action=lobby_arrive/.test(l))).toBe(true);
+      for (const l of lines) expect(l).toMatch(/^room=\w{5} stage=earth tick=\d+ actor=\S+ name=\S+ action=\w+/);
+      for (const tok of [a.token, b.token]) expect(out).not.toContain(tok);
+      a.close();
+      b.close();
+    } finally {
+      p.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

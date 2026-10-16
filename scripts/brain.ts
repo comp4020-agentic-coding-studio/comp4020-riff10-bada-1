@@ -74,8 +74,10 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     return [stop, { k: "build", x: spot[0], y: spot[1], type, eff }];
   };
 
-  // the "tried" mark is set only when the command is actually sent, so walking over never counts as trying
+  // the "tried" mark is set only when the command is actually sent, so walking over never counts as trying;
+  // and a tend that would move nothing is never attempted
   const tend = (b: Building): Act => {
+    if (!tendUseful(s, b)) return gather(s, pid, mem, b.type === "factory" ? { mineral: 8, matter: 6 } : { coolant: 10 });
     const [cx, cy] = centreOf(b);
     if (!within(cx, cy, TEND_RANGE)) return walkTo(cx, cy);
     mem.failed.set(`t${b.id}`, mem.step + 2);
@@ -99,6 +101,15 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
   const powerKind: BuildingType | null = st.energySource === "bottled" ? null : st.id === "earth" && strat === "rush" ? "furnace" : "solar";
   const eff = (t: BuildingType): boolean => strat === "green" && !!BUILDINGS[t].kit && t !== "extractor" && t !== "habitat" && t !== "furnace" && have(s, "wire") >= 2 && have(s, "frame") >= 1 && done("datacentre").length > 0;
 
+  // 0. the Universe with the Bottled Sun spent: the host renders a World Engine down for power, for good
+  if (st.mechanic === "legacy" && s.reserve < 40 && s.hostId === pid && !tried("render")) {
+    const engine = s.buildings.find((b) => b.type === "engine");
+    if (engine) {
+      const [cx, cy] = centreOf(engine);
+      mem.failed.set("render", mem.step + 20);
+      return out.concat([toward(me, cx, cy), { k: "demolish", x: engine.x, y: engine.y }]);
+    }
+  }
   // 1. Mars: air before anything else can run
   if (st.mechanic === "pressure" && !has("habitat").length) {
     const a = build("habitat", findSpot(s, "habitat", base, pid));
@@ -291,6 +302,18 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     return out.concat([stop, { k: "harvest", x: site.x, y: site.y }]);
   }
   return out.concat(gather(s, pid, mem, null));
+}
+
+/** Would a tend at this building move anything? Mirrors the server's tend command. */
+function tendUseful(s: RoomState, b: Building): boolean {
+  if (Object.values(b.out ?? {}).some((v) => (v ?? 0) > 0)) return true;
+  if (b.type === "intake") return (b.tank ?? 0) > 0;
+  if (b.type === "factory") {
+    const recipes = b.job ? [b.job.r] : b.recipe && b.recipe !== "auto" ? [b.recipe] : (["wire", "frame"] as const);
+    return recipes.some((r) => Object.entries(recipeOf(b, r).in).some(([k, need]) => have(s, k as Item) > 0 && (b.buf?.[k as Item] ?? 0) < Math.min(12, (need ?? 0) * 2)));
+  }
+  const tank = BUILDINGS[b.type].tank;
+  return !!tank && !b.legacy && (b.tank ?? 0) < tank && s.inventory.coolant > 0;
 }
 
 const lineCost = (s: RoomState, kind: LineKind, path: [number, number][], q: 0 | 1): Cost => {
