@@ -159,7 +159,15 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     if (b.legacy) continue;
     const pump = has("intake").find((q) => livePump(q) && dist(...centreOf(q), ...centreOf(b)) < 16);
     if (!pump && has("intake").filter(livePump).length >= 2) break;
-    if (!pump && (has("intake").some((q) => !complete(q)) || has("intake").length >= 5)) break;
+    if (!pump && (has("intake").some((q) => !complete(q)) || has("intake").length >= 10)) break;
+    // a dry pump is taken down for half its cost before a new one goes up beside fresh water
+    const dry = mine.find((q) => q.type === "intake" && complete(q) && !livePump(q) && !(q.tank ?? 0));
+    if (!pump && dry && !tried(`d${dry.id}`)) {
+      mem.failed.set(`d${dry.id}`, mem.step + 10);
+      const [cx, cy] = centreOf(dry);
+      if (!within(cx, cy, 7)) return out.concat(walkTo(cx, cy));
+      return out.concat([stop, { k: "demolish", x: dry.x, y: dry.y }]);
+    }
     if (!pump) {
       const a = build("intake", intakeSpot(s, centreOf(b), pid));
       if (a) return out.concat(a);
@@ -188,14 +196,14 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
   const dcs = has("datacentre");
   const parts = (NEXT_DATACENTRE.wire ?? 0) + (NEXT_DATACENTRE.frame ?? 0);
   // 7. feed the factory and collect its parts, until the first datacentre is paid for
-  if (factory && (dcs.length === 0 || (strat === "green" && !factory.kit && factory.recipe !== "kit"))) {
+  if (factory && dcs.length === 0) {
     const outQ = Object.values(factory.out ?? {}).reduce((a, v) => a + (v ?? 0), 0);
     const goodsHave = have(s, "wire") + have(s, "frame");
     const next = nextRecipe(s, factory);
     const missing = "r" in next && !factory.job ? Object.entries(recipeOf(factory, next.r).in).filter(([k, v]) => (factory.buf?.[k as Item] ?? 0) < (v ?? 0)) : [];
     const canLoad = missing.some(([k]) => have(s, k as Item) > 0);
     if ((outQ > 0 || canLoad) && !tried(`t${factory.id}`)) return out.concat(tend(factory));
-    if (missing.length && goodsHave < parts && !s.claims.some((c) => c.owner === pid && strat !== "green")) {
+    if (missing.length && goodsHave < parts) {
       const want: Cost = {};
       for (const [k, v] of missing) if ((FAMILIES as readonly string[]).includes(k)) want[k as Item] = (v ?? 0) * 2;
       return out.concat(gather(s, pid, mem, want));
@@ -221,8 +229,11 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
   }
   const dc = done("datacentre")[0];
   // 9. green: make a kit (2 wire + 1 frame) and fit it, factory first, then the datacentre and harvesters
-  if (strat === "green" && factory && dc) {
-    const target = [factory, dc, ...done("extractor")].find((b) => !b.kit);
+  // kits come once the first automated line runs: invest after the loop works, not instead of it
+  if (strat === "green" && factory && dc && s.ops.firstAutomation !== null) {
+    // the factory first (on Mars, the dome: a sealed dome halves the colony's ice), then the datacentre and harvesters
+    const first = st.mechanic === "pressure" ? done("habitat").slice(0, 1) : [];
+    const target = [...first, factory, dc, ...done("extractor")].find((b) => !b.kit);
     const kitOut = factory.out?.kit ?? 0;
     if (target && s.goods.kit > 0) {
       const [cx, cy] = centreOf(target);
@@ -238,10 +249,8 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
         mem.failed.set(`r${factory.id}${recipe}`, mem.step + 6);
         return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe, target: recipe === "kit" ? 1 : 0 }]);
       }
-      const bufQ = Object.values(factory.buf ?? {}).reduce((a, v) => a + (v ?? 0), 0);
-      if ((kitOut > 0 || (recipe === "kit" && !factory.job && wantKit) || (recipe === "auto" && bufQ < 4 && (s.inventory.mineral >= 3 || s.inventory.matter >= 3)) || Object.values(factory.out ?? {}).some((v) => (v ?? 0) > 0)) && !tried(`t${factory.id}`))
-        return out.concat(tend(factory));
-      if (recipe === "auto" && bufQ < 4) return out.concat(gather(s, pid, mem, { mineral: 8, matter: 6 }));
+      if (tendUseful(s, factory) && !tried(`t${factory.id}`)) return out.concat(tend(factory));
+      if (recipe === "auto" && factory.status.startsWith("idle: no ")) return out.concat(gather(s, pid, mem, { mineral: 8, matter: 6 }));
     } else if (factory.recipe === "kit" && !tried(`r${factory.id}auto`)) {
       mem.failed.set(`r${factory.id}auto`, mem.step + 30);
       return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe: "auto", target: 0 }]);
@@ -254,11 +263,22 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     if (a) return out.concat(a);
   }
   // 10. automate: harvesters belted to a store or straight into the factory
-  if (dc && (s.econ.computeSupply > s.econ.computeUsed || has("extractor").length)) {
+  if (dc && (s.econ.computeSupply > s.econ.computeUsed || has("extractor").length || st.mechanic === "pressure")) {
     const xs = has("extractor");
     const cap = st.mechanic === "relay" ? 4 : 3;
     if (xs.length < cap && s.econ.computeSupply - s.econ.computeUsed >= 1 && xs.every(complete)) {
-      const a = build("extractor", extractorSpot(s, base, pid));
+      const spot = extractorSpot(s, base, pid);
+      if (!spot && st.mechanic === "pressure" && has("habitat").length < 3 && has("habitat").every(complete)) {
+        // Mars: a second dome over the nearest deposits, so drills have air
+        const a = build("habitat", domeSpot(s, base, pid));
+        if (a) return out.concat(a);
+      }
+      if (!spot && st.mechanic === "relay" && has("relay").length < 6 && has("relay").every(complete)) {
+        // the Solar System: extend the relay network out toward the belt first
+        const a = build("relay", relaySpot(s, base, pid));
+        if (a) return out.concat(a);
+      }
+      const a = build("extractor", spot);
       if (a) return out.concat(a);
     }
     for (const x of done("extractor")) {
@@ -503,6 +523,52 @@ function extractorSpot(s: RoomState, near: [number, number], pid: string): [numb
       if (st.mechanic === "relay" && !s.buildings.some((r) => BUILDINGS[r.type].relayRange && Math.max(Math.abs(r.x - x), Math.abs(r.y - y)) <= BUILDINGS[r.type].relayRange! - 1)) continue;
       if (claimAt(s, x, y)) continue;
       const why = placementProblem(s, "extractor", x, y, { id: pid, x, y });
+      if (why && !/^needs /.test(why)) continue;
+      [score, best] = [v, [x, y]];
+    }
+  return best;
+}
+
+/** A dome spot whose air would cover deposits a drill could reach. */
+function domeSpot(s: RoomState, base: [number, number], pid: string): [number, number] | null {
+  let best: [number, number] | null = null;
+  let score = -Infinity;
+  const r = BUILDINGS.habitat.pressureRadius!;
+  for (let y = 0; y < s.w - 1; y++)
+    for (let x = 0; x < s.w - 1; x++) {
+      let stock = 0;
+      for (let dy = -r + 1; dy <= r; dy++) for (let dx = -r + 1; dx <= r; dx++) {
+        if (!inBounds(s, x + dx, y + dy)) continue;
+        const t = s.tiles[(y + dy) * s.w + x + dx];
+        if (t.d && t.d !== "coolant" && t.amt > 0) stock += t.amt;
+      }
+      const v = stock - dist(x, y, base[0], base[1]) * 8;
+      if (v <= score || footprint({ type: "habitat", x, y }).some(([fx, fy]) => claimAt(s, fx, fy))) continue;
+      const why = placementProblem(s, "habitat", x, y, { id: pid, x, y });
+      if (why && !/^needs /.test(why)) continue;
+      [score, best] = [v, [x, y]];
+    }
+  return best;
+}
+
+/** A relay spot inside the network's reach, as far out toward the deposits as it goes. */
+function relaySpot(s: RoomState, base: [number, number], pid: string): [number, number] | null {
+  const nodes = s.buildings.filter((b) => BUILDINGS[b.type].relayRange && complete(b));
+  let best: [number, number] | null = null;
+  let score = -Infinity;
+  for (let y = 0; y < s.w; y++)
+    for (let x = 0; x < s.w; x++) {
+      const linked = nodes.some((r) => Math.max(Math.abs(r.x - x), Math.abs(r.y - y)) <= BUILDINGS[r.type].relayRange! - 1);
+      if (!linked) continue;
+      let stock = 0;
+      for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++) {
+        if (!inBounds(s, x + dx, y + dy)) continue;
+        const t = s.tiles[(y + dy) * s.w + x + dx];
+        if (t.d && t.d !== "coolant" && t.amt > 0) stock += t.amt;
+      }
+      const v = stock - dist(x, y, base[0], base[1]);
+      if (v <= score || claimAt(s, x, y)) continue;
+      const why = placementProblem(s, "relay", x, y, { id: pid, x, y });
       if (why && !/^needs /.test(why)) continue;
       [score, best] = [v, [x, y]];
     }

@@ -406,7 +406,7 @@ export const STAGES: StageDef[] = [
     families: {
       matter: { label: "regolith", tiles: 30, perTile: 29 },
       mineral: { label: "iron", tiles: 18, perTile: 32 },
-      coolant: { label: "buried ice", tiles: 18, perTile: 26 },
+      coolant: { label: "buried ice", tiles: 18, perTile: 40 },
     },
     buildings: ["habitat", "solar", "city", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
