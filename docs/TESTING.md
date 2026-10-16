@@ -37,6 +37,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 - a datacentre with no cable draws no power (`unwired` counts it), then idles on an empty tank, then runs once filled
 - a pump and cheap pipe to a datacentre: everything pumped is in a tank, was drunk or leaked, with the leak exactly the persisted counter's whole units
 - a belt carries one item a tile per economy tick into a store; a belt into nothing blocks and conserves its items; taking a loaded belt up returns its load once
+- a belt branched off the middle of another makes a splitter: six items fed in come out three each way, and the count on the belts plus what's arrived equals what went in on every tick
 - the lobby replants a harvested grove and logs it with its name and the tile; stripped of stock, it plants until its bank is empty to the unit, family by family, then goes home; it pickets a datacentre site for at most its bounded ticks and the site still finishes; a world still ends at exhaustion with the lobby active, and it stops at once
 - rushed against sustainable bots on one Earth: both reach a factory, a datacentre and automation; the rush gets its datacentre sooner, destroys more than five times as much, and never buys a kit; the green route extracts more useful stock and keeps its datacentre running longer
 - both strategies finish a whole five-world campaign with the books balanced on every tick and a datacentre on every world
@@ -58,7 +59,7 @@ The factory chain, claims, networks and the Green Lobby (crit 10):
 
 **`spec/invariants.test.ts`**, the course's: `/` answers and `/readme/` publishes this README with every heading.
 
-51 tests, all passing locally against a freshly built server.
+52 tests, all passing locally against a freshly built server.
 
 ## Multiplayer playthroughs
 
@@ -130,9 +131,8 @@ Answered from bot runs and browser play, not from human playtesters, which this 
 ## Next development, in priority order
 
 1. Human playtests of the first ten minutes (factory, claim, datacentre, first belt) and the ending, then tuning from what people actually do.
-2. A splitter tile for belts. Machines already split their output round-robin across every belt leading away and merges take turns, but there's no mid-belt junction yet.
-3. Interest management (send each client only nearby tile changes) before maps grow.
-4. Sprite art for buildings and avatars, replacing the procedural shapes one family at a time (see [`ASSETS.md`](ASSETS.md)).
-5. Host moderation: remove a player, lock a room to new joiners.
-6. A photo album kept per room, so the archive has pictures, not just names.
-7. Touch-first line laying (drag to draw).
+2. Interest management (send each client only nearby tile changes) before maps grow.
+3. Sprite art for buildings and avatars, replacing the procedural shapes one family at a time (see [`ASSETS.md`](ASSETS.md)).
+4. Host moderation: remove a player, lock a room to new joiners.
+5. A photo album kept per room, so the archive has pictures, not just names.
+6. Touch-first line laying (drag to draw).

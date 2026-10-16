@@ -999,6 +999,12 @@ export class Renderer {
           const col = t.bt.it in st.palette ? st.palette[t.bt.it as Family] : "#e8c46a";
           for (let k = 0; k < t.bt.n; k++) this.ellipse(ix + (k - (t.bt.n - 1) / 2) * 5 * z, iy - 3 * z, 3 * z, 2.4 * z, col, OUTLINE);
         }
+        if (t.bt.sp) {
+          // a splitter: a little diamond hub, labelled when the networks are showing
+          const [hx, hy] = at(x, y, 0, 0.15);
+          this.poly([[hx, hy - 5 * z], [hx + 7 * z, hy], [hx, hy + 5 * z], [hx - 7 * z, hy]], "#f2c14e", OUTLINE);
+          if (show) this.label("splitter", ...at(x, y, 0, -0.25), "#fff3c8", 9);
+        }
         if (t.bt.bk && show) this.label("✕ blocked", ...at(x, y, 0, 0.3), "#ffd1cc", 9);
       }
       ctx.globalAlpha = 1;

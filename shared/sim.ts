@@ -501,12 +501,16 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       if (short) return no(short);
       pay(s, cost);
       const dirs = c.kind === "belt" ? beltDirs(c.path, c.d) : [];
+      // a belt branched off the middle of another belt makes that tile a splitter: it keeps its arrow
+      // and alternates items between straight on and the branch
+      const branch = c.kind === "belt" && c.path.length > 1 && !!s.tiles[idxs[0]].bt && dirs[0] !== s.tiles[idxs[0]].bt!.d && (dirs[0] + 2) % 4 !== s.tiles[idxs[0]].bt!.d;
       idxs.forEach((i, k) => {
         const t = s.tiles[i];
         const isNew = !hasKind(t, c.kind);
         if (c.kind === "cable") t.cb ??= pid;
         else if (c.kind === "pipe") t.pp ??= [pid, c.q];
         else if (c.kind === "path") t.pa ??= [pid, c.q];
+        else if (t.bt && k === 0 && branch) t.bt.sp = 1;
         else if (t.bt) t.bt.d = dirs[k];
         else t.bt = { o: pid, d: dirs[k], q: c.q, n: 0 };
         if (isNew) t.life = Math.min(t.life, spec.life[c.q]);
@@ -514,8 +518,8 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       });
       ch.meta = true;
       const [a, b] = [c.path[0], c.path[c.path.length - 1]];
-      log(s, ch, `${p.name} laid ${fresh.length} tile${fresh.length === 1 ? "" : "s"} of ${spec.q[c.q]}.`);
-      ev("line", { kind: c.kind, quality: spec.q[c.q]!, tiles: fresh.length, from: `${a[0]},${a[1]}`, to: `${b[0]},${b[1]}`, cost: fmt(cost) });
+      log(s, ch, `${p.name} laid ${fresh.length} tile${fresh.length === 1 ? "" : "s"} of ${spec.q[c.q]}${branch ? ", branching off with a splitter" : ""}.`);
+      ev("line", { kind: c.kind, quality: spec.q[c.q]!, tiles: fresh.length, from: `${a[0]},${a[1]}`, to: `${b[0]},${b[1]}`, cost: fmt(cost), ...(branch ? { splitter: `${a[0]},${a[1]}` } : {}) });
       return OK;
     }
     case "unline": {

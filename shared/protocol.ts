@@ -28,8 +28,8 @@ export interface Tile {
   cb?: string;
   /** pipe: owner id, quality (0 cheap, 1 sealed) */
   pp?: [string, 0 | 1];
-  /** belt: owner, direction (0 +x, 1 +y, 2 -x, 3 -y), quality, carried item and count, blocked last tick */
-  bt?: { o: string; d: 0 | 1 | 2 | 3; q: 0 | 1; it?: Item; n: number; bk?: 1 };
+  /** belt: owner, direction (0 +x, 1 +y, 2 -x, 3 -y), quality, carried item and count, blocked last tick, splitter (and its round-robin turn) */
+  bt?: { o: string; d: 0 | 1 | 2 | 3; q: 0 | 1; it?: Item; n: number; bk?: 1; sp?: 1; r?: number };
   /** path: owner id, quality (0 rough track, 1 laid path) */
   pa?: [string, 0 | 1];
 }

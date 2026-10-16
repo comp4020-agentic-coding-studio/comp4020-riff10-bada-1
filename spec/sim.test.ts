@@ -776,6 +776,57 @@ describe("networks", () => {
   });
 });
 
+describe("belt splitters", () => {
+  it("a belt branched off another makes a splitter that alternates items between both ways, conserving them", () => {
+    const { s, ch } = stocked();
+    // find a clear 7x5 patch of ground for a T of belts
+    let o: [number, number] | null = null;
+    for (let y = 1; y < s.w - 6 && !o; y++)
+      for (let x = 1; x < s.w - 8 && !o; x++) {
+        let clear = true;
+        for (let dy = 0; dy < 5 && clear; dy++) for (let dx = 0; dx < 7 && clear; dx++) {
+          const t = s.tiles[(y + dy) * s.w + x + dx];
+          if (t.t !== 0 || t.b || (t.d && t.amt > 0)) clear = false;
+        }
+        if (clear) o = [x, y];
+      }
+    expect(o).not.toBeNull();
+    const [ox, oy] = o!;
+    stand(s, "a", ox + 3, oy + 2);
+    // a straight belt running east, ending in open ground, and a branch going south from its middle
+    ok(cmd(s, ch, "a", { k: "line", kind: "belt", q: 0, path: [[ox, oy + 1], [ox + 1, oy + 1], [ox + 2, oy + 1], [ox + 3, oy + 1], [ox + 4, oy + 1], [ox + 5, oy + 1]] }));
+    ok(cmd(s, ch, "a", { k: "line", kind: "belt", q: 0, path: [[ox + 2, oy + 1], [ox + 2, oy + 2], [ox + 2, oy + 3], [ox + 2, oy + 4]] }));
+    const hub = s.tiles[(oy + 1) * s.w + ox + 2].bt!;
+    expect(hub.sp).toBe(1);
+    expect(hub.d).toBe(0);
+    // feed five ore in at the start, one per tick, and count what reaches each end
+    const ends = { east: 0, south: 0 };
+    const total = (): number => s.tiles.reduce((a, t) => a + (t.bt?.n ?? 0), 0) + ends.east + ends.south;
+    let fed = 0;
+    for (let k = 0; k < 30; k++) {
+      const start = s.tiles[(oy + 1) * s.w + ox].bt!;
+      if (fed < 6 && start.n === 0) {
+        start.it = "mineral";
+        start.n = 1;
+        fed++;
+      }
+      econ(s, ch, 1);
+      for (const [name, x, y] of [["east", ox + 5, oy + 1], ["south", ox + 2, oy + 4]] as const) {
+        const t = s.tiles[y * s.w + x].bt!;
+        if (t.n) {
+          ends[name] += t.n;
+          t.n = 0;
+          delete t.it;
+        }
+      }
+      expect(total()).toBe(fed);
+    }
+    expect(ends.east + ends.south).toBe(6);
+    expect(ends.east).toBe(3);
+    expect(ends.south).toBe(3);
+  });
+});
+
 describe("the Green Lobby", () => {
   it("replants a harvested tile, caps what it puts back per family, and goes home when the bank runs dry", () => {
     const { s, ch } = room("rapid");

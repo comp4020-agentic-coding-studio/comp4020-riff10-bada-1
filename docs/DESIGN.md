@@ -82,7 +82,7 @@ An efficiency kit fitted to a building (or built in by efficient construction) d
 | --- | --- | --- |
 | Cable | anything touching a cable is on its grid; a grid has only what its own generators (or a Bottled Sun tap) make; every 16 tiles lose 1 power | short shared runs cost less and lose less |
 | Pipe | a connected pipe network moves 6 coolant a tick from pump tanks to the emptiest tanks touching it | cheap pipe loses 1 unit per 160 (unit × cheap tile) carried, counted in a saved accumulator; sealed loses nothing |
-| Belt | each tile points one way; whole items move one tile per economy tick (two on a fast belt); a tile holds one kind of item; a full destination stops it, shown with a cross | machines push their output onto belts that start beside them, round-robin; merges take turns |
+| Belt | each tile points one way; whole items move one tile per economy tick (two on a fast belt); a tile holds one kind of item; a full destination stops it, shown with a cross | machines push their output onto belts that start beside them, round-robin; merges take turns; a belt laid off the side of another turns that tile into a splitter that alternates items between straight on and the branch |
 | Path | walking is 60% faster on it, and the browser predicts it the same way | a rough track is cheap and tramples; a laid path costs more and barely marks the ground |
 
 Lines go on open ground, around buildings and water, up to 32 tiles, and different kinds can share a tile without joining. Taking a line tile up (`X`) refunds half its cost and returns whatever was riding it, once. Machine allocation runs in building-id order and grids in tile order, so the same machine never wins because of whose message arrived first.

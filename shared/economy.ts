@@ -557,6 +557,18 @@ function pipes(s: RoomState, ch: Changes): void {
   }
 }
 
+/** A splitter's exits: its own arrow, then any side neighbour that is a belt leading away from it. */
+function splitExits(s: RoomState, i: number): (0 | 1 | 2 | 3)[] {
+  const bt = s.tiles[i].bt!;
+  const out: (0 | 1 | 2 | 3)[] = [bt.d];
+  for (const side of [((bt.d + 1) % 4) as 0 | 1 | 2 | 3, ((bt.d + 3) % 4) as 0 | 1 | 2 | 3]) {
+    const j = ahead(s, i, side);
+    const n = j === null ? undefined : s.tiles[j].bt;
+    if (n && ahead(s, j!, n.d) !== i) out.push(side);
+  }
+  return out;
+}
+
 /** Where a belt tile delivers: the tile it points at. */
 const ahead = (s: RoomState, i: number, d: 0 | 1 | 2 | 3): number | null => {
   const x = (i % s.w) + DIRS[d][0];
@@ -613,37 +625,37 @@ function belts(s: RoomState, ch: Changes): void {
       const t = s.tiles[i];
       const bt = t.bt!;
       if (moved.has(i) || arrived.has(i) || !bt.it || bt.n <= 0) continue;
-      const j = ahead(s, i, bt.d);
+      // a splitter tries its exits in turn, starting from the one after last time
+      const exits = bt.sp ? splitExits(s, i) : [bt.d];
+      const item = bt.it;
       let blocked = true;
-      if (j !== null) {
+      for (let e = 0; e < exits.length && blocked; e++) {
+        const j = ahead(s, i, exits[((bt.r ?? 0) + e) % exits.length]);
+        if (j === null) continue;
         const n = s.tiles[j];
+        let k = 0;
         if (n.bt && !n.b) {
-          const room = (n.bt.it && n.bt.it !== bt.it ? 0 : capOf(n) - n.bt.n);
-          const k = Math.min(room, bt.n, capOf(t));
-          if (k > 0 && !arrived.has(j)) {
-            n.bt.it = bt.it;
+          const room = n.bt.it && n.bt.it !== item ? 0 : capOf(n) - n.bt.n;
+          k = arrived.has(j) ? 0 : Math.min(room, bt.n, capOf(t));
+          if (k > 0) {
+            n.bt.it = item;
             n.bt.n += k;
-            bt.n -= k;
-            if (bt.n === 0) delete bt.it;
             arrived.add(j);
-            moved.add(i);
-            ch.tiles.add(i);
             ch.tiles.add(j);
-            blocked = false;
-            progress = true;
           }
         } else if (n.b) {
           const b = s.buildings.find((q) => q.id === n.b)!;
-          const k = Math.min(accepts(s, b, bt.it), bt.n, capOf(t));
-          if (k > 0) {
-            deliver(s, b, bt.it, k, ch);
-            bt.n -= k;
-            if (bt.n === 0) delete bt.it;
-            moved.add(i);
-            ch.tiles.add(i);
-            blocked = false;
-            progress = true;
-          }
+          k = Math.min(accepts(s, b, item), bt.n, capOf(t));
+          if (k > 0) deliver(s, b, item, k, ch);
+        }
+        if (k > 0) {
+          bt.n -= k;
+          if (bt.n === 0) delete bt.it;
+          moved.add(i);
+          ch.tiles.add(i);
+          blocked = false;
+          progress = true;
+          if (bt.sp) bt.r = ((bt.r ?? 0) + e + 1) % exits.length;
         }
       }
       const bk = blocked ? 1 : undefined;
