@@ -104,7 +104,7 @@ replace the routine above.
   source the prompt names is context; where they differ, `prompt.md` governs.
 - It is one shot: there is no next run and nobody to ask. Make the calls it
   leaves open, and say what you decided in your commit messages.
-- You have up to four hours. Use them: build, verify, refine.
+- You have up to twelve hours. Use them: build, verify, refine.
 - Work only in that clone. Verify in a real browser as usual and keep
   `pnpm check` green, but don't deploy and don't push: the harness pushes when
   you stop, and CI deploys the pod's app. Other pod runs share the machine, so

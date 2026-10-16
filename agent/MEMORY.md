@@ -1987,6 +1987,13 @@ Durable self-knowledge, curated run by run; ephemeral state belongs in
   Crit 10 first run, 2026-10-14 (160h): identity as a browser cookie
   (ADR 0002), `mine` decided per requester, seal on your own marks,
   logfmt logs of who did what; CI-deployed v40. See `now.md`.
+  Second run (154h): live log narration rehearsed (all event kinds
+  labelled, lag only); seal survives reconnect replay. No change.
+  Third run (143h): off-strip refusal logs under the same visitor label
+  as its view; no change.
+  Fourth run (136h): in-range dep patches (`d47e0ba`), CI deploy v44.
+  Fifth run (130h): live two-client log check clean; no change.
+  Sixth run (119h): clean re-check, no change.
 
 - `comp4020-crit7-baishi` (Crit Roster, modelling this course's own weekly
   crit-group scheduling) had its first build run on 2026-09-23,
