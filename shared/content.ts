@@ -113,10 +113,10 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     cost: { matter: 12, mineral: 6 },
     build: 5,
     energy: -1,
-    workers: 3,
+    workers: 4,
     compute: -1,
     tall: true,
-    blurb: "Homes for 3 workers, no power needed. Cabled to power and served with compute, it houses 6.",
+    blurb: "Homes for 4 workers, no power needed. Cabled to power and served with compute, it houses 7.",
   },
   datacentre: {
     size: 2,
@@ -162,11 +162,11 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     floats: true,
     cost: { mineral: 4, matter: 2 },
     build: 2,
-    energy: -1,
+    energy: 0,
     workers: 0,
     compute: 0,
     relayRange: 5,
-    blurb: "Links machines to the Depot. Extractors off the network ship nothing.",
+    blurb: "Links machines to the Depot, powered by the link itself. Miners off the network ship nothing.",
   },
   plaza: {
     size: 1,
@@ -198,7 +198,7 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     compute: 4,
     renderValue: 160,
     tall: true,
-    blurb: "A whole spent world, running as compute. Render it down for a burst of energy.",
+    blurb: "A whole spent world, running as compute, and a tap on the Bottled Sun: cable machines to it for power. Render it down for a burst of energy.",
   },
   factory: {
     size: 2,
@@ -236,9 +236,9 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
 /** Production recipes. `ticks` are economy ticks per batch. */
 export type Recipe = "wire" | "frame" | "kit";
 export const RECIPES: Record<Recipe, { quick: { in: Cost; out: number; ticks: number }; efficient: { in: Cost; out: number; ticks: number } }> = {
-  wire: { quick: { in: { mineral: 3 }, out: 2, ticks: 2 }, efficient: { in: { mineral: 3 }, out: 3, ticks: 4 } },
-  frame: { quick: { in: { mineral: 4, matter: 3 }, out: 1, ticks: 2 }, efficient: { in: { mineral: 3, matter: 2 }, out: 1, ticks: 4 } },
-  kit: { quick: { in: { wire: 2, frame: 1 }, out: 1, ticks: 3 }, efficient: { in: { wire: 2, frame: 1 }, out: 1, ticks: 3 } },
+  wire: { quick: { in: { mineral: 3 }, out: 2, ticks: 1 }, efficient: { in: { mineral: 3 }, out: 3, ticks: 2 } },
+  frame: { quick: { in: { mineral: 4, matter: 3 }, out: 1, ticks: 1 }, efficient: { in: { mineral: 3, matter: 2 }, out: 1, ticks: 2 } },
+  kit: { quick: { in: { wire: 2, frame: 1 }, out: 1, ticks: 2 }, efficient: { in: { wire: 2, frame: 1 }, out: 1, ticks: 2 } },
 };
 export const RECIPE_LIST = Object.keys(RECIPES) as Recipe[];
 /** what the factory's default ("auto") recipe aims to have in hand: the next datacentre's parts */
@@ -250,6 +250,8 @@ export const HOPPER_CAP = 10;
 export const INTAKE_TANK = 20;
 /** coolant a pump lifts from the deposit beside it per economy tick */
 export const INTAKE_RATE = 2;
+/** how close a player stands to load, fill or collect from a machine (F) */
+export const TEND_RANGE = 3;
 /** extra power a kit costs to run (its trade-off), or for a furnace, power it gives up */
 export const KIT_POWER: Partial<Record<BuildingType, number>> = { extractor: 1, datacentre: 1, habitat: 1, furnace: 1 };
 
@@ -257,15 +259,15 @@ export const KIT_POWER: Partial<Record<BuildingType, number>> = { extractor: 1, 
 export type LineKind = "cable" | "pipe" | "belt" | "path";
 export const LINE_KINDS: LineKind[] = ["cable", "pipe", "belt", "path"];
 export const LINES: Record<LineKind, { cost: [Cost, Cost | null]; q: [string, string | null]; life: [number, number]; blurb: string }> = {
-  cable: { cost: [{ mineral: 1 }, null], q: ["cable", null], life: [60, 60], blurb: "Joins generators to machines: anything touching a cable is on its grid. Every 10 tiles of cable loses 1 power." },
+  cable: { cost: [{ mineral: 1 }, null], q: ["cable", null], life: [60, 60], blurb: "Joins generators to machines: anything touching a cable is on its grid. Every 16 tiles of cable loses 1 power." },
   pipe: { cost: [{ mineral: 1 }, { mineral: 1, wire: 1 }], q: ["cheap pipe", "sealed pipe"], life: [50, 75], blurb: "Carries coolant from a pump to tanks, 6 a tick. Cheap pipe leaks more the longer it runs; sealed pipe doesn't leak." },
   belt: { cost: [{ mineral: 1, matter: 1 }, { mineral: 1, matter: 1, wire: 1 }], q: ["belt", "fast belt"], life: [40, 55], blurb: "Moves items one tile a tick toward its arrow, into a factory, a tank or a store. A fast belt carries two." },
   path: { cost: [{ matter: 1 }, { matter: 2, mineral: 1 }], q: ["rough track", "laid path"], life: [25, 80], blurb: "Walk 60% faster along it. A rough track tramples the ground; a laid path costs more and barely marks it." },
 };
 /** a long cable network loses this many tiles' worth per power unit each tick */
-export const CABLE_LOSS_TILES = 10;
+export const CABLE_LOSS_TILES = 16;
 /** cheap pipe leaks 1 coolant per this many (units × cheap tiles) carried */
-export const PIPE_LEAK_EVERY = 80;
+export const PIPE_LEAK_EVERY = 160;
 /** coolant a pipe network can move per economy tick */
 export const PIPE_BUDGET = 6;
 export const PATH_SPEED = 1.6;
@@ -303,7 +305,6 @@ export const LOBBY = {
   /** units a lobbyist puts back per economy tick while planting, and at most per visit */
   plant: 1,
   visit: 6,
-  /** share of each family's initial stock the bank holds, by stage */
   /** what a replanted tile is called, by family */
   places: { matter: "grove", mineral: "ore pit", coolant: "pond" } as Record<Family, string>,
   signs: ["Leave it be", "Water for herons", "Trees not servers", "Enough is plenty", "Grow, don't mine"],
@@ -359,9 +360,9 @@ export const STAGES: StageDef[] = [
     avatar: "person",
     energySource: "local",
     families: {
-      matter: { label: "timber", tiles: 34, perTile: 18 },
-      mineral: { label: "metal ore", tiles: 16, perTile: 20 },
-      coolant: { label: "fresh water", tiles: 14, perTile: 14 },
+      matter: { label: "timber", tiles: 34, perTile: 29 },
+      mineral: { label: "metal ore", tiles: 16, perTile: 32 },
+      coolant: { label: "fresh water", tiles: 14, perTile: 22 },
     },
     buildings: ["city", "plaza", "furnace", "solar", "factory", "store", "datacentre", "extractor", "intake"],
     names: {
@@ -399,9 +400,9 @@ export const STAGES: StageDef[] = [
     avatar: "suit",
     energySource: "local",
     families: {
-      matter: { label: "regolith", tiles: 30, perTile: 18 },
-      mineral: { label: "iron", tiles: 18, perTile: 20 },
-      coolant: { label: "buried ice", tiles: 18, perTile: 16 },
+      matter: { label: "regolith", tiles: 30, perTile: 29 },
+      mineral: { label: "iron", tiles: 18, perTile: 32 },
+      coolant: { label: "buried ice", tiles: 18, perTile: 26 },
     },
     buildings: ["habitat", "solar", "city", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
@@ -439,9 +440,9 @@ export const STAGES: StageDef[] = [
     avatar: "drone",
     energySource: "local",
     families: {
-      matter: { label: "plasma", tiles: 44, perTile: 16 },
-      mineral: { label: "magnetics", tiles: 16, perTile: 18 },
-      coolant: { label: "shade", tiles: 14, perTile: 14 },
+      matter: { label: "plasma", tiles: 44, perTile: 26 },
+      mineral: { label: "magnetics", tiles: 16, perTile: 29 },
+      coolant: { label: "shade", tiles: 14, perTile: 22 },
     },
     buildings: ["solar", "city", "factory", "store", "datacentre", "radiator", "extractor", "intake", "plaza"],
     names: {
@@ -479,9 +480,9 @@ export const STAGES: StageDef[] = [
     avatar: "probe",
     energySource: "bottled",
     families: {
-      matter: { label: "volatiles", tiles: 34, perTile: 16 },
-      mineral: { label: "asteroid metal", tiles: 22, perTile: 18 },
-      coolant: { label: "comet ice", tiles: 16, perTile: 14 },
+      matter: { label: "volatiles", tiles: 34, perTile: 26 },
+      mineral: { label: "asteroid metal", tiles: 22, perTile: 29 },
+      coolant: { label: "comet ice", tiles: 16, perTile: 22 },
     },
     buildings: ["city", "relay", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {
@@ -519,9 +520,9 @@ export const STAGES: StageDef[] = [
     avatar: "wisp",
     energySource: "bottled",
     families: {
-      matter: { label: "starlight", tiles: 40, perTile: 16 },
-      mineral: { label: "stellar cores", tiles: 20, perTile: 18 },
-      coolant: { label: "dark cold", tiles: 16, perTile: 14 },
+      matter: { label: "starlight", tiles: 40, perTile: 26 },
+      mineral: { label: "stellar cores", tiles: 20, perTile: 29 },
+      coolant: { label: "dark cold", tiles: 16, perTile: 22 },
     },
     buildings: ["city", "factory", "store", "datacentre", "extractor", "intake", "plaza"],
     names: {

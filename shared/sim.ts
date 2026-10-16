@@ -5,49 +5,71 @@
 import {
   BUILDINGS,
   BUILD_RANGE,
+  BUILD_SCAR,
+  CLAIMS_PER_PLAYER,
+  CLAIM_COST,
+  CLAIM_SIZE,
+  EFFICIENT_BUILD,
+  EFFICIENT_EXTRA,
   EMOTES,
   FAMILIES,
+  GOODS,
   HARVEST_COOLDOWN_TICKS,
+  HARVEST_MODES,
   HARVEST_RANGE,
-  HEAT_LIMIT,
+  INPUT_CAP,
+  LINES,
   MARKS_PER_PLAYER,
   MAX_IDENTITIES,
   MAX_PLAYERS,
   PACES,
-  PLAYER_SPEED,
-  SALVAGE_RATE,
+  RECIPE_LIST,
   STAGES,
   SUN_TO_RESERVE,
+  TEND_RANGE,
   TICK_MS,
   buildingName,
+  isItem,
+  itemLabel,
   type Bundle,
   type BuildingType,
+  type Cost,
   type Family,
+  type Item,
+  type LineKind,
   type Pace,
+  type Recipe,
 } from "./content.ts";
-import type { Building, Command, Ledger, Player, RoomState, StageSummary, Tile } from "./protocol.ts";
+import type { Building, Claim, Command, Ledger, Ops, Player, RoomState, StageSummary, Tile } from "./protocol.ts";
 import { SCHEMA_VERSION } from "./protocol.ts";
 import { generateStage } from "./worldgen.ts";
+import { beltDirs, claimAt, footprint, inBounds, lineOwner, linePathProblem, speedAt } from "./layout.ts";
+import { economy, recipeOf } from "./economy.ts";
+import { lobbyAct, lobbyMove, newLobby } from "./lobby.ts";
+import {
+  add,
+  affordable,
+  complete,
+  emptyGoods,
+  emptyLedger,
+  event,
+  have,
+  log,
+  pay,
+  remember,
+  salvageOf,
+  sumCost,
+  takeFrom,
+  tileAt,
+  workNeeded,
+  type Changes,
+} from "./world.ts";
 
-/** What changed during one call: the server turns this into a delta. */
-export interface Changes {
-  tiles: Set<number>;
-  buildings: Set<number>;
-  removed: number[];
-  meta: boolean;
-  log: number;
-  /** a stage boundary or the ending: save now, then broadcast a fresh snapshot */
-  boundary: boolean;
-}
-
-export const newChanges = (): Changes => ({ tiles: new Set(), buildings: new Set(), removed: [], meta: false, log: 0, boundary: false });
+export { newChanges, type Changes } from "./world.ts";
 
 export type Result = { ok: true } | { ok: false; reason: string };
 const no = (reason: string): Result => ({ ok: false, reason });
 const OK: Result = { ok: true };
-
-const emptyLedger = (): Ledger =>
-  Object.fromEntries(FAMILIES.map((f) => [f, { initial: 0, remaining: 0, extracted: 0, destroyed: 0 }])) as Ledger;
 
 function ledgerFor(tiles: Tile[]): Ledger {
   const l = emptyLedger();
@@ -58,6 +80,20 @@ function ledgerFor(tiles: Tile[]): Ledger {
   return l;
 }
 
+export const emptyOps = (): Ops => ({
+  goods: 0,
+  coolantUsed: 0,
+  coolantLost: 0,
+  energyUsed: 0,
+  energyGen: 0,
+  solarGen: 0,
+  cableLoss: 0,
+  firstFactory: null,
+  firstDatacentre: null,
+  firstAutomation: null,
+  busy: 0,
+});
+
 /**
  * The land holds only as much life as its world has left: every tile's life
  * is capped by how much of the world remains (60%) and how much of its water,
@@ -67,7 +103,7 @@ function ledgerFor(tiles: Tile[]): Ledger {
  * costs no traffic.
  */
 export const lifeCap = (ledger: Ledger): number => {
-  const frac = (rem: number, init: number): number => (init ? rem / init : 0);
+  const frac = (rem: number, init: number): number => (init ? Math.min(1, rem / init) : 0);
   const total = FAMILIES.reduce((a, f) => a + ledger[f].remaining, 0);
   const initial = FAMILIES.reduce((a, f) => a + ledger[f].initial, 0);
   const left = 0.6 * frac(total, initial) + 0.4 * frac(ledger.coolant.remaining, ledger.coolant.initial);
@@ -82,8 +118,11 @@ export const averageLife = (s: Pick<RoomState, "tiles" | "ledger">): number => {
   return Math.round(land.reduce((a, t) => a + effectiveLife(t, cap), 0) / Math.max(1, land.length));
 };
 
+const emptyEcon = (): RoomState["econ"] => ({ energySupply: 0, energyUsed: 0, computeSupply: 0, computeUsed: 0, workersSupply: 0, workersUsed: 0, unwired: 0, drawn: 0 });
+
 export function createRoom(code: string, seed: number, pace: Pace): RoomState {
   const g = generateStage(seed, 0);
+  const ledger = ledgerFor(g.tiles);
   const s: RoomState = {
     v: SCHEMA_VERSION,
     code,
@@ -103,8 +142,14 @@ export function createRoom(code: string, seed: number, pace: Pace): RoomState {
     buildings: g.buildings,
     nextBuildingId: g.buildings.length + 1,
     inventory: { ...STAGES[0].starter },
-    ledger: ledgerFor(g.tiles),
-    econ: { energySupply: 0, energyUsed: 0, computeSupply: 0, computeUsed: 0, workersSupply: 0, workersUsed: 0 },
+    goods: emptyGoods(),
+    claims: [],
+    nextClaimId: 1,
+    lobby: newLobby(0, ledger),
+    ops: emptyOps(),
+    leak: 0,
+    ledger,
+    econ: emptyEcon(),
     heat: 0,
     reserve: 0,
     history: [],
@@ -126,12 +171,6 @@ export const spawnPoint = (s: RoomState): { x: number; y: number } => {
   return { x: c, y: c };
 };
 
-function log(s: RoomState, ch: Changes, text: string): void {
-  s.log.push({ tick: s.tick, text });
-  if (s.log.length > 40) s.log.splice(0, s.log.length - 40);
-  ch.log++;
-}
-
 const cleanText = (raw: unknown, max: number): string | null => {
   if (typeof raw !== "string") return null;
   // printable characters only; collapse whitespace; hard length cap
@@ -147,6 +186,7 @@ export function join(s: RoomState, id: string, token: string, name: string, ch: 
     existing.connected = true;
     if (!s.hostId || !s.players[s.hostId]?.connected) s.hostId = id;
     log(s, ch, `${existing.name} is back.`);
+    event(ch, id, existing.name, "rejoin");
     ch.meta = true;
     return existing;
   }
@@ -185,6 +225,7 @@ export function join(s: RoomState, id: string, token: string, name: string, ch: 
     nextHarvest: 0,
     nextEmote: 0,
     marks: 0,
+    mode: "careful",
     stats: { harvested: 0, built: 0, helped: 0 },
   };
   s.players[id] = p;
@@ -192,11 +233,12 @@ export function join(s: RoomState, id: string, token: string, name: string, ch: 
   s.receipts[id] = [];
   if (!s.hostId || !s.players[s.hostId]?.connected) s.hostId = id;
   log(s, ch, `${p.name} arrived.`);
+  event(ch, id, p.name, "join", { colour });
   ch.meta = true;
   return p;
 }
 
-/** A player's connection dropped. Their buildings and stats stay; the host role moves on. */
+/** A player's connection dropped. Their buildings, claims and stats stay; the host role moves on. */
 export function leave(s: RoomState, id: string, ch: Changes): void {
   const p = s.players[id];
   if (!p) return;
@@ -209,26 +251,44 @@ export function leave(s: RoomState, id: string, ch: Changes): void {
     s.hostId = next ? next.id : id;
   }
   log(s, ch, `${p.name} stepped away.`);
+  event(ch, id, p.name, "leave");
   ch.meta = true;
 }
 
-const centre = (b: Pick<Building, "x" | "y" | "type">): [number, number] => {
-  const h = (BUILDINGS[b.type].size - 1) / 2;
-  return [b.x + h, b.y + h];
-};
-
 const isInt = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n);
-const tileAt = (s: RoomState, x: number, y: number): Tile | undefined => (inBounds(s, x, y) ? s.tiles[y * s.w + x] : undefined);
-const near = (p: Player, x: number, y: number, range: number): boolean => Math.hypot(p.x - x, p.y - y) <= range;
-const complete = (b: Building): boolean => b.work >= BUILDINGS[b.type].build * 10;
+const near = (p: Pick<Player, "x" | "y">, x: number, y: number, range: number): boolean => Math.hypot(p.x - x, p.y - y) <= range;
 
 export const isHost = (s: RoomState, id: string): boolean => s.hostId === id;
 
+const ownerName = (s: RoomState, id: string | null | undefined): string => (id ? (s.players[id]?.name ?? "someone") : "the Cooperative");
+
+/** What a building costs to build, standard or efficient. */
+export const buildCost = (type: BuildingType, eff: boolean): Cost => (eff ? sumCost(BUILDINGS[type].cost, EFFICIENT_EXTRA) : BUILDINGS[type].cost);
+
+/** The first thing a cost is short of, as a player reads it: "needs 6 wire (have 2)". */
+export function shortfall(s: RoomState, cost: Cost): string | null {
+  const st = STAGES[s.stage];
+  for (const [k, v] of Object.entries(cost)) {
+    const n = have(s, k as Item);
+    if (n < (v ?? 0)) return `needs ${v} ${itemLabel(st, k as Item)} (have ${n})`;
+  }
+  return null;
+}
+
+/** Every shortage at once, for the build preview. */
+export function shortfalls(s: RoomState, cost: Cost): string[] {
+  const st = STAGES[s.stage];
+  return Object.entries(cost)
+    .filter(([k, v]) => have(s, k as Item) < (v ?? 0))
+    .map(([k, v]) => `${v} ${itemLabel(st, k as Item)} (have ${have(s, k as Item)})`);
+}
+
 /** Why a building can't go here, or null if it can. Shared by server and the ghost preview. */
-export function placementProblem(s: RoomState, type: BuildingType, x: number, y: number, p?: Player): string | null {
+export function placementProblem(s: RoomState, type: BuildingType, x: number, y: number, p?: Pick<Player, "id" | "x" | "y">, eff = false): string | null {
   const st = STAGES[s.stage];
   if (!st.buildings.includes(type)) return `nothing like that can be built on ${st.name}`;
   const def = BUILDINGS[type];
+  if (eff && !def.kit) return `there's no efficient ${buildingName(st, type)}`;
   for (const [fx, fy] of footprint({ type, x, y })) {
     const t = tileAt(s, fx, fy);
     if (!t) return "off the edge of the map";
@@ -236,49 +296,40 @@ export function placementProblem(s: RoomState, type: BuildingType, x: number, y:
     if (t.d && t.amt > 0) return `there's ${st.families[t.d].label} here: harvest it first`;
     if (t.t === 1) return "can't build on water";
     if (t.t === 3) return "can't build on the star itself";
-    if (t.t === 2 && type !== "relay") return "nothing to build on: only relays float in open space";
+    if (t.t === 2 && !def.floats) return "nothing to build on: only relays and taps float in open space";
+    if (t.cb || t.pp || t.bt || t.pa) return "a line runs here: take it up first, or build beside it";
+    const c = claimAt(s, fx, fy);
+    if (c && p && c.owner !== p.id) return `that's ${ownerName(s, c.owner)}'s land`;
+    if (def.needsClaim && (!c || (p && c.owner !== p.id))) return c ? `that's ${ownerName(s, c.owner)}'s land` : "claim this ground first: the whole footprint inside your own claim";
   }
   if (p && !near(p, x + (def.size - 1) / 2, y + (def.size - 1) / 2, BUILD_RANGE)) return "too far away: walk closer";
-  for (const f of FAMILIES) {
-    const need = def.cost[f] ?? 0;
-    if (s.inventory[f] < need) return `needs ${need} ${st.families[f].label} (have ${s.inventory[f]})`;
-  }
-  return null;
+  return shortfall(s, buildCost(type, eff));
 }
 
-function remember(s: RoomState, tile: Tile, fate: string, ch: Changes): void {
-  if (!tile.mark) return;
-  s.archive.push({ stage: STAGES[s.stage].id, name: tile.mark.name, fate });
-  log(s, ch, `${tile.mark.name} ${fate}.`);
-  delete tile.mark;
-  ch.meta = true;
-}
-
-function takeFrom(s: RoomState, idx: number, amount: number, ch: Changes): number {
-  const tile = s.tiles[idx];
-  if (!tile.d || tile.amt <= 0) return 0;
-  const took = Math.min(amount, tile.amt);
-  tile.amt -= took;
-  s.ledger[tile.d].remaining -= took;
-  s.ledger[tile.d].extracted += took;
-  s.inventory[tile.d] += took;
-  tile.life = Math.min(tile.life, Math.round((tile.amt / tile.init) * 60));
-  ch.tiles.add(idx);
-  ch.meta = true;
-  if (tile.amt === 0) {
-    remember(s, tile, "was harvested bare", ch);
-    // a grove or pond gone leaves the ground around it poorer
-    const x = idx % s.w;
-    const y = Math.floor(idx / s.w);
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) {
-        const n = tileAt(s, x + dx, y + dy);
-        if (!n || n.t === 2 || (dx === 0 && dy === 0)) continue;
-        n.life = Math.max(0, n.life - 15);
-        ch.tiles.add((y + dy) * s.w + x + dx);
+/** Why this player can't claim the 4x4 square with this top-left corner, or null. */
+export function claimProblem(s: RoomState, x: number, y: number, p: Pick<Player, "id" | "x" | "y">): string | null {
+  if (!isInt(x) || !isInt(y) || x < 0 || y < 0 || x + CLAIM_SIZE > s.w || y + CLAIM_SIZE > s.w) return "a claim has to fit on the map";
+  if (s.claims.filter((c) => c.owner === p.id).length >= CLAIMS_PER_PLAYER) return `you can hold ${CLAIMS_PER_PLAYER} claims per world: give one up first`;
+  for (const c of s.claims)
+    if (x < c.x + CLAIM_SIZE && c.x < x + CLAIM_SIZE && y < c.y + CLAIM_SIZE && c.y < y + CLAIM_SIZE) return c.owner === p.id ? "that overlaps your own claim" : `that's ${ownerName(s, c.owner)}'s land`;
+  let ground = 0;
+  for (let dy = 0; dy < CLAIM_SIZE; dy++)
+    for (let dx = 0; dx < CLAIM_SIZE; dx++) {
+      const t = s.tiles[(y + dy) * s.w + x + dx];
+      if (t.b) {
+        const b = s.buildings.find((q) => q.id === t.b)!;
+        // never capture someone else's building, or the Cooperative's
+        if (b.owner !== p.id) return `the ${buildingName(STAGES[s.stage], b.type)} there is ${ownerName(s, b.owner)}'s: claim around it`;
       }
-  }
-  return took;
+      for (const k of ["cable", "pipe", "belt", "path"] as LineKind[]) {
+        const o = lineOwner(t, k);
+        if (o && o !== p.id) return `${ownerName(s, o)}'s ${k} runs there: claim around it`;
+      }
+      if (t.t === 0) ground++;
+    }
+  if (ground < 4) return "there's hardly any ground to build on there";
+  if (!near(p, x + CLAIM_SIZE / 2 - 0.5, y + CLAIM_SIZE / 2 - 0.5, BUILD_RANGE)) return "too far away: walk closer";
+  return shortfall(s, CLAIM_COST);
 }
 
 function receipt(s: RoomState, pid: string, cmdId: string): void {
@@ -312,9 +363,25 @@ export function applyCommand(s: RoomState, pid: string, cmdId: string, gen: numb
   return res;
 }
 
+const buildingOn = (s: RoomState, x: unknown, y: unknown): Building | undefined => {
+  if (!isInt(x) || !isInt(y)) return undefined;
+  const t = tileAt(s, x, y);
+  return t?.b ? s.buildings.find((q) => q.id === t.b) : undefined;
+};
+
+/** Owners control their machines; the host can step in to recover a room. */
+const mayControl = (s: RoomState, b: Building, pid: string): boolean => b.owner === pid || isHost(s, pid) || (b.owner === null && !BUILDINGS[b.type].protected);
+
+const fmt = (c: Partial<Record<Item, number>>): string =>
+  Object.entries(c)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${v} ${k}`)
+    .join(" + ") || "nothing";
+
 function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch: Changes): Result {
   const pid = p.id;
   const st = STAGES[s.stage];
+  const ev = (action: string, fields: Record<string, string | number | boolean> = {}): void => event(ch, pid, p.name, action, fields);
 
   switch (c.k) {
     case "harvest": {
@@ -326,7 +393,7 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       if (tile.b) {
         const b = s.buildings.find((q) => q.id === tile.b)!;
         if (complete(b)) return no(`the ${buildingName(st, b.type)} is already built`);
-        b.work = Math.min(BUILDINGS[b.type].build * 10, b.work + 5);
+        b.work = Math.min(workNeeded(b), b.work + 5);
         ch.buildings.add(b.id);
         p.stats.helped++;
         p.nextHarvest = s.tick + HARVEST_COOLDOWN_TICKS;
@@ -334,29 +401,48 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
         return OK;
       }
       if (!tile.d || tile.amt <= 0) return no("nothing to harvest there");
-      const took = takeFrom(s, idx, PACES[s.pace].harvestYield, ch);
+      const mode = HARVEST_MODES[p.mode];
+      const y = PACES[s.pace].harvestYield;
+      const fam = tile.d;
+      const [took, lost] = takeFrom(s, idx, mode.useful * y, mode.waste * y, ch);
+      if (mode.scar) {
+        tile.life = Math.max(0, tile.life - mode.scar);
+        ch.tiles.add(idx);
+      }
       withdraw(s, p, ch);
       p.stats.harvested += took;
       p.nextHarvest = s.tick + HARVEST_COOLDOWN_TICKS;
       p.act = { k: "harvest", until: s.tick + 4 };
       p.facing = facingTo(c.x - p.x, c.y - p.y, p.facing);
+      // one log line per tile emptied, not per swing: enough to narrate, not a flood
+      if (tile.amt === 0) ev("harvest_bare", { family: fam, x: c.x, y: c.y, mode: p.mode });
+      else if (p.stats.harvested % 20 < took) ev("harvest", { family: fam, took, wasted: lost, x: c.x, y: c.y, mode: p.mode, total: p.stats.harvested });
       checkExhausted(s, ch);
       return OK;
     }
     case "build": {
-      if (!isInt(c.x) || !isInt(c.y) || typeof c.type !== "string" || !(c.type in BUILDINGS)) return no("malformed build");
-      const problem = placementProblem(s, c.type, c.x, c.y, p);
+      if (!isInt(c.x) || !isInt(c.y) || typeof c.type !== "string" || !Object.hasOwn(BUILDINGS, c.type)) return no("malformed build");
+      const eff = c.eff === true;
+      const problem = placementProblem(s, c.type, c.x, c.y, p, eff);
       if (problem) return no(problem);
       const def = BUILDINGS[c.type];
+      const cost = buildCost(c.type, eff);
       // payment and occupancy commit together: nothing between them can fail
-      for (const f of FAMILIES) s.inventory[f] -= def.cost[f] ?? 0;
-      const b: Building = { id: s.nextBuildingId++, type: c.type, x: c.x, y: c.y, owner: pid, work: 0, status: "under construction" };
+      pay(s, cost);
+      const b: Building = { id: s.nextBuildingId++, type: c.type, x: c.x, y: c.y, owner: pid, work: 0, status: "under construction", paid: { ...cost } };
+      if (eff) {
+        b.eff = true;
+        b.kit = true;
+        b.need = Math.round(def.build * 10 * EFFICIENT_BUILD);
+      }
+      if (c.type === "factory") b.recipe = "auto";
+      if (c.type === "extractor") b.mode = "intensive";
       s.buildings.push(b);
       for (const [fx, fy] of footprint(b)) {
         const idx = fy * s.w + fx;
         const tile = s.tiles[idx];
         tile.b = b.id;
-        if (c.type !== "plaza") tile.life = Math.min(tile.life, 15);
+        if (c.type !== "plaza") tile.life = Math.min(tile.life, eff ? BUILD_SCAR.efficient : BUILD_SCAR.standard);
         ch.tiles.add(idx);
         remember(s, tile, `became a ${buildingName(st, c.type)}`, ch);
       }
@@ -365,14 +451,215 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       withdraw(s, p, ch);
       p.stats.built++;
       p.act = { k: "build", until: s.tick + 6 };
-      log(s, ch, `${p.name} started a ${buildingName(st, c.type)}.`);
+      log(s, ch, `${p.name} started ${eff ? "an efficient" : "a"} ${buildingName(st, c.type)}.`);
+      ev("build", { building: c.type, id: b.id, x: c.x, y: c.y, eff, cost: fmt(cost) });
+      return OK;
+    }
+    case "claim": {
+      const why = claimProblem(s, c.x, c.y, p);
+      if (why) return no(why);
+      pay(s, CLAIM_COST);
+      const claim: Claim = { id: s.nextClaimId++, owner: pid, x: c.x, y: c.y };
+      s.claims.push(claim);
+      ch.meta = true;
+      log(s, ch, `${p.name} staked a claim.`);
+      ev("claim", { claim: claim.id, x: c.x, y: c.y, size: CLAIM_SIZE });
+      return OK;
+    }
+    case "unclaim": {
+      if (!isInt(c.x) || !isInt(c.y)) return no("malformed unclaim");
+      const claim = claimAt(s, c.x, c.y);
+      if (!claim) return no("nobody has claimed that ground");
+      if (claim.owner !== pid && !isHost(s, pid)) return no(`that's ${ownerName(s, claim.owner)}'s land: only they or the host can give it up`);
+      s.claims = s.claims.filter((q) => q.id !== claim.id);
+      ch.meta = true;
+      log(s, ch, `${p.name} gave up ${claim.owner === pid ? "a claim" : `${ownerName(s, claim.owner)}'s claim`}.`);
+      ev("unclaim", { claim: claim.id, owner: claim.owner, x: claim.x, y: claim.y });
+      return OK;
+    }
+    case "line": {
+      if (typeof c.kind !== "string" || !Object.hasOwn(LINES, c.kind)) return no("malformed line");
+      if (c.q !== 0 && c.q !== 1) return no("malformed line");
+      if (!Array.isArray(c.path) || !c.path.every((q) => Array.isArray(q) && q.length === 2 && isInt(q[0]) && isInt(q[1]))) return no("malformed line");
+      if (c.d !== undefined && ![0, 1, 2, 3].includes(c.d)) return no("malformed line");
+      const spec = LINES[c.kind];
+      const unit = spec.cost[c.q];
+      if (!unit) return no(`there's only one kind of ${c.kind}`);
+      const why = linePathProblem(s, c.kind, c.path, p);
+      if (why) return no(why);
+      const idxs = c.path.map(([x, y]) => y * s.w + x);
+      // tiles that already carry this kind are reused: a belt is re-aimed, the rest kept
+      const fresh = idxs.filter((i) => !hasKind(s.tiles[i], c.kind));
+      for (const i of idxs) {
+        const o = lineOwner(s.tiles[i], c.kind);
+        if (o && o !== pid && !isHost(s, pid) && c.kind === "belt") return no(`that's ${ownerName(s, o)}'s belt: you can feed it, not re-aim it`);
+      }
+      if (!fresh.length && c.kind !== "belt") return no(`there's already ${c.kind} all along there`);
+      const cost: Cost = {};
+      for (const [k, v] of Object.entries(unit)) cost[k as Item] = (v ?? 0) * fresh.length;
+      const short = shortfall(s, cost);
+      if (short) return no(short);
+      pay(s, cost);
+      const dirs = c.kind === "belt" ? beltDirs(c.path, c.d) : [];
+      idxs.forEach((i, k) => {
+        const t = s.tiles[i];
+        const isNew = !hasKind(t, c.kind);
+        if (c.kind === "cable") t.cb ??= pid;
+        else if (c.kind === "pipe") t.pp ??= [pid, c.q];
+        else if (c.kind === "path") t.pa ??= [pid, c.q];
+        else if (t.bt) t.bt.d = dirs[k];
+        else t.bt = { o: pid, d: dirs[k], q: c.q, n: 0 };
+        if (isNew) t.life = Math.min(t.life, spec.life[c.q]);
+        ch.tiles.add(i);
+      });
+      ch.meta = true;
+      const [a, b] = [c.path[0], c.path[c.path.length - 1]];
+      log(s, ch, `${p.name} laid ${fresh.length} tile${fresh.length === 1 ? "" : "s"} of ${spec.q[c.q]}.`);
+      ev("line", { kind: c.kind, quality: spec.q[c.q]!, tiles: fresh.length, from: `${a[0]},${a[1]}`, to: `${b[0]},${b[1]}`, cost: fmt(cost) });
+      return OK;
+    }
+    case "unline": {
+      if (!isInt(c.x) || !isInt(c.y) || typeof c.kind !== "string" || !Object.hasOwn(LINES, c.kind)) return no("malformed unline");
+      const t = tileAt(s, c.x, c.y);
+      if (!t || !hasKind(t, c.kind)) return no(`no ${c.kind} there`);
+      const o = lineOwner(t, c.kind)!;
+      if (o !== pid && !isHost(s, pid)) return no(`that's ${ownerName(s, o)}'s ${c.kind}: only they or the host can take it up`);
+      const q = c.kind === "pipe" ? t.pp![1] : c.kind === "path" ? t.pa![1] : c.kind === "belt" ? t.bt!.q : 0;
+      const back = salvageOf(LINES[c.kind].cost[q]!);
+      // what rode the belt comes back once, separately from salvage
+      const load: Partial<Record<Item, number>> = {};
+      if (c.kind === "belt" && t.bt?.it && t.bt.n > 0) load[t.bt.it] = t.bt.n;
+      for (const [k, v] of Object.entries(back)) add(s, k as Item, v ?? 0);
+      for (const [k, v] of Object.entries(load)) add(s, k as Item, v ?? 0);
+      if (c.kind === "cable") delete t.cb;
+      else if (c.kind === "pipe") delete t.pp;
+      else if (c.kind === "belt") delete t.bt;
+      else delete t.pa;
+      ch.tiles.add(c.y * s.w + c.x);
+      ch.meta = true;
+      ev("unline", { kind: c.kind, owner: o, x: c.x, y: c.y, salvage: fmt(back), returned: fmt(load) });
+      return OK;
+    }
+    case "tend": {
+      // load a machine from the shared stockpile, or collect its output into it
+      const b = buildingOn(s, c.x, c.y);
+      if (!b) return no("nothing built there");
+      if (!complete(b)) return no("it isn't finished yet: press E beside it to help");
+      const [cx, cy] = [b.x + (BUILDINGS[b.type].size - 1) / 2, b.y + (BUILDINGS[b.type].size - 1) / 2];
+      if (!near(p, cx, cy, TEND_RANGE + BUILDINGS[b.type].size / 2)) return no("stand beside it to load or collect");
+      const moved: Partial<Record<Item, number>> = {};
+      const took: Partial<Record<Item, number>> = {};
+      // collecting is anyone's: output already belongs to the shared stockpile
+      if (b.out) for (const [k, v] of Object.entries(b.out)) if (v) {
+        add(s, k as Item, v);
+        took[k as Item] = v;
+        b.out[k as Item] = 0;
+      }
+      if (b.type === "intake" && b.tank) {
+        took.coolant = b.tank;
+        s.inventory.coolant += b.tank;
+        b.tank = 0;
+      }
+      if (b.type === "factory") {
+        // top up the inputs for what it's making now, or will make next
+        const recipes: Recipe[] = b.job ? [b.job.r] : b.recipe && b.recipe !== "auto" ? [b.recipe] : ["wire", "frame"];
+        b.buf ??= {};
+        for (const r of recipes)
+          for (const [k, need] of Object.entries(recipeOf(b, r).in)) {
+            const item = k as Item;
+            const want = Math.min(INPUT_CAP, (need ?? 0) * 2) - (b.buf[item] ?? 0);
+            const n = Math.max(0, Math.min(want, have(s, item)));
+            if (n > 0) {
+              add(s, item, -n);
+              b.buf[item] = (b.buf[item] ?? 0) + n;
+              moved[item] = (moved[item] ?? 0) + n;
+            }
+          }
+      }
+      const tank = BUILDINGS[b.type].tank;
+      if (tank && b.type !== "intake" && !b.legacy) {
+        const n = Math.max(0, Math.min(tank - (b.tank ?? 0), s.inventory.coolant, 10));
+        if (n > 0) {
+          s.inventory.coolant -= n;
+          b.tank = (b.tank ?? 0) + n;
+          moved.coolant = n;
+        }
+      }
+      const any = Object.values(moved).some(Boolean) || Object.values(took).some(Boolean);
+      if (!any) {
+        if (b.type === "factory") return no(`nothing to load: the stockpile has none of what it needs`);
+        if (tank) return no(`nothing to fill it with: the stockpile has no ${st.families.coolant.label}`);
+        return no("nothing to load or collect here");
+      }
+      ch.buildings.add(b.id);
+      ch.meta = true;
+      ev("tend", { building: b.type, id: b.id, owner: b.owner ?? "", loaded: fmt(moved), collected: fmt(took) });
+      return OK;
+    }
+    case "set": {
+      if (c.mode !== undefined && c.x === undefined) {
+        // the player's own hand-harvest mode
+        if (!Object.hasOwn(HARVEST_MODES, c.mode)) return no("unknown harvest mode");
+        if (p.mode !== c.mode) {
+          p.mode = c.mode;
+          ev("mode", { harvest: c.mode });
+        }
+        return OK;
+      }
+      const b = buildingOn(s, c.x, c.y);
+      if (!b) return no("nothing built there");
+      if (!mayControl(s, b, pid)) return no(`that's ${ownerName(s, b.owner)}'s ${buildingName(st, b.type)}: only they or the host can change it`);
+      const changes: Record<string, string | number | boolean> = {};
+      if (c.recipe !== undefined) {
+        if (b.type !== "factory") return no("only a factory has recipes");
+        if (c.recipe !== "auto" && !RECIPE_LIST.includes(c.recipe)) return no("unknown recipe");
+        // a batch in progress finishes as it was started: switching never refunds or duplicates it
+        b.recipe = c.recipe;
+        changes.recipe = c.recipe;
+      }
+      if (c.target !== undefined) {
+        if (b.type !== "factory" || !isInt(c.target) || c.target < 0 || c.target > 99) return no("a target is a whole number from 0 to 99");
+        b.target = c.target;
+        changes.target = c.target;
+      }
+      if (c.quick !== undefined) {
+        if (b.type !== "factory" || typeof c.quick !== "boolean") return no("malformed setting");
+        if (!b.kit) return no("only a factory with an efficiency kit has a choice of recipes");
+        b.quick = c.quick;
+        changes.quick = c.quick;
+      }
+      if (c.mode !== undefined) {
+        if (b.type !== "extractor" || !Object.hasOwn(HARVEST_MODES, c.mode)) return no("only a harvester has a mode");
+        b.mode = c.mode;
+        changes.mode = c.mode;
+      }
+      if (!Object.keys(changes).length) return no("nothing to change");
+      ch.buildings.add(b.id);
+      ev("set", { building: b.type, id: b.id, owner: b.owner ?? "", ...changes });
+      return OK;
+    }
+    case "upgrade": {
+      const b = buildingOn(s, c.x, c.y);
+      if (!b) return no("nothing built there");
+      const def = BUILDINGS[b.type];
+      if (!def.kit) return no(`there's no efficiency kit for a ${buildingName(st, b.type)}`);
+      if (b.kit) return no("it already has an efficiency kit");
+      if (!complete(b)) return no("finish building it first");
+      if (!mayControl(s, b, pid)) return no(`that's ${ownerName(s, b.owner)}'s ${buildingName(st, b.type)}: only they or the host can upgrade it`);
+      if (s.goods.kit < 1) return no(`needs 1 ${st.goods.kit} (have 0): make one in a factory`);
+      s.goods.kit--;
+      b.kit = true;
+      b.paid = sumCost(b.paid ?? def.cost, { kit: 1 });
+      ch.buildings.add(b.id);
+      ch.meta = true;
+      log(s, ch, `${p.name} fitted an efficiency kit to a ${buildingName(st, b.type)}.`);
+      ev("upgrade", { building: b.type, id: b.id, owner: b.owner ?? "" });
       return OK;
     }
     case "demolish": {
+      const b = buildingOn(s, c.x, c.y);
       if (!isInt(c.x) || !isInt(c.y)) return no("malformed demolish");
-      const tile = tileAt(s, c.x, c.y);
-      if (!tile?.b) return no("nothing built there");
-      const b = s.buildings.find((q) => q.id === tile.b)!;
+      if (!b) return no("nothing built there");
       const def = BUILDINGS[b.type];
       if (def.protected) return no("the Depot is shared: nobody can take it down");
       if (def.renderValue) {
@@ -380,11 +667,23 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
         s.reserve += def.renderValue;
         s.archive.push({ stage: st.id, name: b.name ?? "A world", fate: `was rendered down for ${def.renderValue} energy` });
         log(s, ch, `${p.name} rendered down ${b.name}.`);
+        ev("render", { building: b.type, id: b.id, name: b.name ?? "", energy: def.renderValue });
       } else {
         if (b.owner !== pid && !isHost(s, pid)) return no("only its builder or the host can take this down");
-        // lossy salvage: always strictly less than the cost, so no refund loop
-        for (const f of FAMILIES) s.inventory[f] += Math.floor((def.cost[f] ?? 0) * SALVAGE_RATE);
-        log(s, ch, `${p.name} took down a ${buildingName(st, b.type)}.`);
+        // lossy salvage: always strictly less than the cost, goods included, so no refund loop
+        const salvage = salvageOf(b.paid ?? def.cost);
+        for (const [k, v] of Object.entries(salvage)) add(s, k as Item, v ?? 0);
+        // what it held comes back exactly once, separately; a batch in progress keeps its committed inputs
+        const held: Partial<Record<Item, number>> = {};
+        const put = (k: Item, n: number): void => {
+          if (n > 0) held[k] = (held[k] ?? 0) + n;
+        };
+        for (const st2 of [b.buf, b.out]) if (st2) for (const [k, v] of Object.entries(st2)) put(k as Item, v ?? 0);
+        if (b.job) for (const [k, v] of Object.entries(recipeOf(b, b.job.r).in)) put(k as Item, v ?? 0);
+        if (b.tank && !b.legacy) put("coolant", b.tank);
+        for (const [k, v] of Object.entries(held)) add(s, k as Item, v ?? 0);
+        log(s, ch, `${p.name} took down ${b.owner === pid ? "a" : `${ownerName(s, b.owner)}'s`} ${buildingName(st, b.type)}.`);
+        ev("demolish", { building: b.type, id: b.id, owner: b.owner ?? "", salvage: fmt(salvage), returned: fmt(held) });
       }
       for (const [fx, fy] of footprint(b)) {
         const idx = fy * s.w + fx;
@@ -417,6 +716,7 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       p.marks++;
       ch.tiles.add(c.y * s.w + c.x);
       log(s, ch, `${p.name} named a place ${name}.`);
+      ev("mark", { x: c.x, y: c.y, place: name });
       return OK;
     }
     case "stop": {
@@ -427,6 +727,7 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       if (p.stop !== c.on) {
         p.stop = c.on;
         log(s, ch, c.on ? `${p.name} wants to stop here and leave the rest alone.` : `${p.name} wants to keep going.`);
+        ev("vote_stop", { on: c.on });
         ch.meta = true;
       }
       checkRestraint(s, ch);
@@ -437,10 +738,26 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
   }
 }
 
+const hasKind = (t: Tile, kind: LineKind): boolean => (kind === "cable" ? !!t.cb : kind === "pipe" ? !!t.pp : kind === "belt" ? !!t.bt : !!t.pa);
+
 function withdraw(s: RoomState, p: Player, ch: Changes): void {
   if (!p.stop) return;
   p.stop = false;
   log(s, ch, `${p.name} went back to work.`);
+}
+
+function summarise(s: RoomState): StageSummary {
+  const st = STAGES[s.stage];
+  return {
+    stage: st.id,
+    ledger: structuredClone(s.ledger),
+    lifeStart: s.lifeStart,
+    lifeEnd: averageLife(s),
+    buildings: s.buildings.filter((b) => b.owner).length,
+    ticks: s.tick - s.stageStartTick,
+    lost: s.archive.filter((a) => a.stage === st.id).map((a) => a.name),
+    ops: structuredClone(s.ops),
+  };
 }
 
 /**
@@ -454,21 +771,16 @@ export function checkRestraint(s: RoomState, ch: Changes): void {
   if (here.length === 0 || !here.every((p) => p.stop)) return;
   const left = totalRemaining(s);
   if (left === 0) return;
-  s.history.push({
-    stage: "universe",
-    ledger: structuredClone(s.ledger),
-    lifeStart: s.lifeStart,
-    lifeEnd: averageLife(s),
-    buildings: s.buildings.filter((b) => b.owner).length,
-    ticks: s.tick - s.stageStartTick,
-    lost: s.archive.filter((a) => a.stage === "universe").map((a) => a.name),
-  });
+  s.history.push(summarise(s));
   for (const t of s.tiles) if (t.mark) s.archive.push({ stage: "universe", name: t.mark.name, fate: "is still there" });
   s.archive.push({ stage: "universe", name: `${left} units of the Universe`, fate: "were left alone" });
   s.phase = { k: "ended", how: "restraint" };
+  s.lobby.agents = [];
   for (const p of Object.values(s.players)) p.dx = p.dy = 0;
   log(s, ch, "You stopped. The rest is still out there.");
+  event(ch, "room", "room", "ending", { how: "restraint", left });
   ch.meta = true;
+  ch.lobby = true;
   ch.boundary = true;
 }
 
@@ -477,29 +789,23 @@ export function facingTo(dx: number, dy: number, fallback: number): number {
   return (Math.round((Math.atan2(dy, dx) / (Math.PI * 2)) * 8) + 8) % 8;
 }
 
+/** Exact exhaustion moves the room on: nothing else gates it, and the lobby stops at once. */
 function checkExhausted(s: RoomState, ch: Changes): void {
   if (s.phase.k !== "play") return;
   if (FAMILIES.some((f) => s.ledger[f].remaining > 0)) return;
   const st = STAGES[s.stage];
-  const lost: string[] = [];
   for (const t of s.tiles) if (t.mark) {
-    lost.push(t.mark.name);
     s.archive.push({ stage: st.id, name: t.mark.name, fate: `was left behind on spent ${st.name}` });
     delete t.mark;
   }
-  const summary: StageSummary = {
-    stage: st.id,
-    ledger: structuredClone(s.ledger),
-    lifeStart: s.lifeStart,
-    lifeEnd: averageLife(s),
-    buildings: s.buildings.filter((b) => b.owner).length,
-    ticks: s.tick - s.stageStartTick,
-    lost: [...s.archive.filter((a) => a.stage === st.id).map((a) => a.name)],
-  };
+  const summary = summarise(s);
   s.history.push(summary);
   s.phase = { k: "transition", until: s.tick + PACES[s.pace].transitionTicks, summary };
+  s.lobby.agents = [];
   log(s, ch, st.departure);
+  event(ch, "room", "room", "stage_spent", { stage: st.id, restored: FAMILIES.reduce((a, f) => a + s.ledger[f].restored, 0), goods: s.ops.goods });
   ch.meta = true;
+  ch.lobby = true;
   ch.boundary = true;
 }
 
@@ -509,10 +815,12 @@ function nextStage(s: RoomState, ch: Changes): void {
     s.phase = { k: "ended", how: "consumed" };
     for (const p of Object.values(s.players)) p.dx = p.dy = 0;
     log(s, ch, "The engine keeps searching for a next frontier. There isn't one.");
+    event(ch, "room", "room", "ending", { how: "consumed" });
     ch.meta = true;
     ch.boundary = true;
     return;
   }
+  // only plasma actually extracted is bottled; what careless scooping destroyed is gone
   if (leaving.id === "sun") s.reserve += s.ledger.matter.extracted * SUN_TO_RESERVE;
   s.stage++;
   s.gen++;
@@ -523,7 +831,12 @@ function nextStage(s: RoomState, ch: Changes): void {
   s.buildings = g.buildings;
   s.nextBuildingId = g.buildings.length + 1;
   s.inventory = { ...st.starter };
+  s.goods = emptyGoods();
+  s.claims = [];
   s.ledger = ledgerFor(g.tiles);
+  s.lobby = newLobby(s.stage, s.ledger);
+  s.ops = emptyOps();
+  s.leak = 0;
   s.heat = 0;
   s.stageStartTick = s.tick;
   s.lifeStart = averageLife(s);
@@ -538,7 +851,9 @@ function nextStage(s: RoomState, ch: Changes): void {
   });
   s.receipts = Object.fromEntries(Object.keys(s.players).map((id) => [id, []]));
   log(s, ch, st.arrival);
+  event(ch, "room", "room", "stage_start", { stage: st.id, reserve: s.reserve });
   ch.meta = true;
+  ch.lobby = true;
   ch.boundary = true;
 }
 
@@ -549,8 +864,9 @@ export function tick(s: RoomState, ch: Changes): void {
   for (const p of Object.values(s.players)) {
     if (p.act && p.act.until <= s.tick) p.act = null;
     if (!p.connected || s.phase.k === "ended" || (p.dx === 0 && p.dy === 0)) continue;
-    p.x = Math.max(0, Math.min(s.w - 1, p.x + p.dx * PLAYER_SPEED * dt));
-    p.y = Math.max(0, Math.min(s.w - 1, p.y + p.dy * PLAYER_SPEED * dt));
+    const v = speedAt(s, p.x, p.y);
+    p.x = Math.max(0, Math.min(s.w - 1, p.x + p.dx * v * dt));
+    p.y = Math.max(0, Math.min(s.w - 1, p.y + p.dy * v * dt));
     p.facing = facingTo(p.dx, p.dy, p.facing);
   }
   if (s.phase.k === "transition") {
@@ -558,224 +874,34 @@ export function tick(s: RoomState, ch: Changes): void {
     return;
   }
   if (s.phase.k === "ended") return;
-  if (s.tick % PACES[s.pace].econEvery === 0) economy(s, ch);
-}
-
-const setStatus = (b: Building, status: string, ch: Changes): void => {
-  if (b.status !== status) {
-    b.status = status;
-    ch.buildings.add(b.id);
+  lobbyMove(s, ch);
+  if (s.tick % PACES[s.pace].econEvery === 0) {
+    economy(s, ch);
+    // a world spent by its machines moves on before the lobby can plant anything back
+    checkExhausted(s, ch);
+    if (s.phase.k === "play") lobbyAct(s, ch);
   }
-};
-
-const ring = (s: RoomState, b: Building): number[] => {
-  const n = BUILDINGS[b.type].size;
-  const out: number[] = [];
-  for (let y = b.y - 1; y <= b.y + n; y++)
-    for (let x = b.x - 1; x <= b.x + n; x++) {
-      if (x >= b.x && x < b.x + n && y >= b.y && y < b.y + n) continue;
-      if (inBounds(s, x, y)) out.push(y * s.w + x);
-    }
-  return out;
-};
-
-const within = (s: RoomState, b: Building, radius: number): number[] => {
-  const [cx, cy] = centre(b);
-  const out: number[] = [];
-  for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++)
-    for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++)
-      if (inBounds(s, x, y) && Math.max(Math.abs(x - cx), Math.abs(y - cy)) <= radius + 0.5) out.push(y * s.w + x);
-  return out;
-};
-
-function economy(s: RoomState, ch: Changes): void {
-  s.econTicks++;
-  const st = STAGES[s.stage];
-  const built = s.buildings.filter(complete);
-  for (const b of s.buildings) if (!complete(b)) {
-    b.work = Math.min(BUILDINGS[b.type].build * 10, b.work + 10);
-    ch.buildings.add(b.id);
-    // a finished building earns its real status on the next tick, not a free one now
-    if (complete(b)) setStatus(b, "starting up", ch);
-  }
-  const of = (t: BuildingType): Building[] => built.filter((b) => b.type === t);
-  const plazaTiles = new Set(of("plaza").flatMap((b) => ring(s, b)));
-
-  // workers: cities house 2, or 5 when served last tick, +1 beside a plaza
-  let workers = 0;
-  for (const city of of("city")) {
-    const served = city.status === "ok";
-    const byPlaza = footprint(city).some(([x, y]) => plazaTiles.has(y * s.w + x));
-    workers += 2 + (served ? 3 : 0) + (byPlaza ? 1 : 0);
-  }
-  const workersSupply = workers;
-
-  // energy
-  let energy = 0;
-  for (const f of of("furnace")) {
-    if (workers < 1) setStatus(f, "idle: no workers (build homes)", ch);
-    else if (s.inventory.matter < 1) setStatus(f, `idle: no ${st.families.matter.label} to burn`, ch);
-    else {
-      workers--;
-      s.inventory.matter--;
-      energy += BUILDINGS.furnace.energy;
-      setStatus(f, "ok", ch);
-    }
-  }
-  for (const p of of("solar")) {
-    energy += BUILDINGS.solar.energy * st.solarScale;
-    setStatus(p, "ok", ch);
-  }
-  if (st.energySource === "bottled") energy = s.reserve;
-  const energySupply = st.energySource === "bottled" ? s.reserve : energy;
-
-  let compute = 0;
-  for (const e of of("engine")) {
-    compute += BUILDINGS.engine.compute;
-    setStatus(e, "ok", ch);
-  }
-
-  const take = (b: Building, opts: { pressure?: Set<number>; network?: Set<number> } = {}): boolean => {
-    const def = BUILDINGS[b.type];
-    let why: string | null = null;
-    if (opts.pressure && !footprint(b).some(([x, y]) => opts.pressure!.has(y * s.w + x))) why = "idle: outside a dome's air";
-    else if (opts.network && !opts.network.has(b.id)) why = "idle: not linked to the Depot (build relays)";
-    else if (energy < -def.energy) why = st.energySource === "bottled" ? "idle: the Bottled Sun is empty" : "idle: no power";
-    else if (workers < -def.workers) why = "idle: no workers (build homes)";
-    else if (compute < -def.compute) why = "idle: no compute (build a datacentre)";
-    else if ((def.coolantUse ?? 0) > s.inventory.coolant) why = `idle: no ${st.families.coolant.label} for cooling`;
-    if (why) {
-      setStatus(b, why, ch);
-      return false;
-    }
-    energy += Math.min(0, def.energy);
-    workers += Math.min(0, def.workers);
-    compute += Math.min(0, def.compute);
-    s.inventory.coolant -= def.coolantUse ?? 0;
-    setStatus(b, "ok", ch);
-    return true;
-  };
-
-  // Mars: air comes from domes
-  let pressure: Set<number> | undefined;
-  if (st.mechanic === "pressure") {
-    pressure = new Set();
-    for (const h of of("habitat")) if (take(h)) for (const i of within(s, h, BUILDINGS.habitat.pressureRadius!)) pressure.add(i);
-  }
-  // Solar System: relays link to the depot
-  let network: Set<number> | undefined;
-  if (st.mechanic === "relay") {
-    const nodes = [...of("depot"), ...of("relay").filter((r) => take(r))];
-    network = new Set();
-    const linked: Building[] = nodes.filter((n) => n.type === "depot");
-    for (const n of linked) network.add(n.id);
-    for (let i = 0; i < linked.length; i++) {
-      const [ax, ay] = centre(linked[i]);
-      const range = BUILDINGS[linked[i].type].relayRange!;
-      for (const b of built) {
-        if (network.has(b.id)) continue;
-        const [bx, by] = centre(b);
-        if (Math.max(Math.abs(ax - bx), Math.abs(ay - by)) <= range) {
-          network.add(b.id);
-          if (b.type === "relay" && b.status === "ok") linked.push(b);
-        }
-      }
-    }
-  }
-
-  for (const d of of("datacentre")) if (take(d, { pressure })) compute += BUILDINGS.datacentre.compute;
-  const computeSupply = compute;
-  for (const r of of("radiator")) take(r);
-
-  const throttled = st.mechanic === "heat" && s.heat >= HEAT_LIMIT;
-  let heat = 0;
-  for (const x of of("extractor")) {
-    if (!take(x, { pressure, network })) continue;
-    heat += BUILDINGS.extractor.heat ?? 0;
-    if (throttled && s.econTicks % 2 === 0) {
-      setStatus(x, "throttled: too hot (build radiators)", ch);
-      continue;
-    }
-    const targets = ring(s, x).filter((i) => s.tiles[i].d && s.tiles[i].amt > 0);
-    if (targets.length === 0) {
-      setStatus(x, "idle: nothing left to harvest beside it", ch);
-      continue;
-    }
-    targets.sort((a, b) => s.tiles[b].amt - s.tiles[a].amt);
-    takeFrom(s, targets[0], BUILDINGS.extractor.extract!, ch);
-  }
-  for (const city of of("city")) {
-    const def = BUILDINGS.city;
-    if (energy >= -def.energy && compute >= -def.compute) {
-      energy += def.energy;
-      compute += def.compute;
-      setStatus(city, "ok", ch);
-    } else setStatus(city, energy < -def.energy ? "unserved: no power (houses fewer)" : "unserved: no compute (houses fewer)", ch);
-  }
-  for (const p of of("plaza")) setStatus(p, "ok", ch);
-
-  if (st.energySource === "bottled") s.reserve = Math.max(0, energy);
-
-  // the Sun: heat builds with collectors and computation, radiators shed it
-  if (st.mechanic === "heat") {
-    for (const b of built) if (b.status === "ok" && b.type !== "extractor") heat += BUILDINGS[b.type].heat ?? 0;
-    heat += of("solar").length * 4;
-    for (const r of of("radiator")) if (r.status === "ok") heat -= BUILDINGS.radiator.cooling!;
-    const next = Math.max(0, Math.min(100, s.heat + heat - 2));
-    if (next !== s.heat) ch.meta = true;
-    s.heat = next;
-  }
-
-  // pollution: smoke browns the land and burns groves; extraction scars around it
-  for (const b of built) {
-    const pol = BUILDINGS[b.type].pollution;
-    if (!pol || b.status !== "ok") continue;
-    for (const i of within(s, b, pol.radius)) {
-      const t = s.tiles[i];
-      if (t.t === 2 || t.life === 0) continue;
-      t.life = Math.max(0, t.life - pol.amount);
-      ch.tiles.add(i);
-    }
-    if (pol.burnsMatter) {
-      const grove = within(s, b, pol.radius).find((i) => s.tiles[i].d === "matter" && s.tiles[i].amt > 0);
-      if (grove !== undefined) {
-        const t = s.tiles[grove];
-        const burnt = Math.min(pol.burnsMatter, t.amt);
-        t.amt -= burnt;
-        s.ledger.matter.remaining -= burnt;
-        s.ledger.matter.destroyed += burnt;
-        t.life = Math.min(t.life, Math.round((t.amt / t.init) * 60));
-        ch.tiles.add(grove);
-        if (t.amt === 0) remember(s, t, "burnt away in the smoke", ch);
-      }
-    }
-  }
-
-  const econ = {
-    energySupply,
-    energyUsed: energySupply - Math.max(0, energy),
-    computeSupply,
-    computeUsed: computeSupply - compute,
-    workersSupply,
-    workersUsed: workersSupply - workers,
-  };
-  if (JSON.stringify(econ) !== JSON.stringify(s.econ)) ch.meta = true;
-  s.econ = econ;
-  checkExhausted(s, ch);
 }
 
 /** Total across families; used by tests and the HUD. */
 export const totalRemaining = (s: RoomState): number => FAMILIES.reduce((a, f) => a + s.ledger[f].remaining, 0);
 
-/** initial = remaining + extracted + destroyed, per family, and remaining matches the tiles. */
+/**
+ * initial + restored = remaining + extracted + destroyed, per family;
+ * remaining matches the tiles; and the Green Lobby never put back more than
+ * its seed bank held.
+ */
 export function ledgerHolds(s: RoomState): boolean {
   for (const f of FAMILIES) {
     const l = s.ledger[f];
     const onTiles = s.tiles.reduce((a, t) => a + (t.d === f ? t.amt : 0), 0);
-    if (l.initial !== l.remaining + l.extracted + l.destroyed || onTiles !== l.remaining) return false;
+    if (l.initial + l.restored !== l.remaining + l.extracted + l.destroyed || onTiles !== l.remaining) return false;
+    if (l.restored + s.lobby.bank[f] !== s.lobby.bankStart[f] || s.lobby.bank[f] < 0) return false;
   }
   return true;
 }
 
 export const bundleOk = (b: Bundle): boolean => FAMILIES.every((f) => Number.isSafeInteger(b[f]) && b[f] >= 0);
+export const goodsOk = (s: RoomState): boolean => GOODS.every((g) => Number.isSafeInteger(s.goods[g]) && s.goods[g] >= 0);
+export { isItem };
 export type { Family };

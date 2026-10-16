@@ -4,8 +4,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
 import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMsg, type Delta, type Player, type RoomState, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
-import { PACES, TICK_MS, type Pace } from "../shared/content.ts";
+import { PACES, STAGES, TICK_MS, type Pace } from "../shared/content.ts";
 import { applyCommand, createRoom, join, leave, newChanges, tick, type Changes } from "../shared/sim.ts";
+import type { Ev } from "../shared/world.ts";
 import { loadRoom, roomExists, saveRoom } from "./store.ts";
 
 const SAVE_EVERY_MS = 5000;
@@ -91,10 +92,32 @@ function save(r: LiveRoom): void {
   r.lastSave = Date.now();
 }
 
+const logValue = (v: string | number | boolean): string => {
+  const t = String(v);
+  return /^[\w.,:+-]+$/.test(t) ? t : JSON.stringify(t);
+};
+
+/**
+ * The action log: one logfmt line per action, with the room, the world, the
+ * actor's id and display name, so `flyctl logs` alone tells who did what
+ * (players and the Green Lobby both). Tokens never appear here.
+ */
+export function printEvents(s: RoomState, events: Ev[]): void {
+  for (const e of events) {
+    const { actor, name, action, ...rest } = e;
+    const fields = Object.entries(rest).map(([k, v]) => `${k}=${logValue(v)}`);
+    console.log([`room=${s.code}`, `stage=${STAGES[s.stage].id}`, `tick=${s.tick}`, `actor=${logValue(actor)}`, `name=${logValue(name)}`, `action=${action}`, ...fields].join(" "));
+  }
+}
+
 /** Turn accumulated changes into one delta for everyone. */
 function flush(r: LiveRoom): void {
   const ch = r.ch;
   const s = r.s;
+  if (ch.events.length) {
+    printEvents(s, ch.events);
+    ch.events = [];
+  }
   if (ch.boundary) {
     // persist the boundary before anyone hears about it
     save(r);
@@ -122,7 +145,7 @@ function flush(r: LiveRoom): void {
       moves.push([p.id, r2(x), r2(y), dx, dy, facing]);
     }
   }
-  const any = players.length || moves.length || ch.tiles.size || ch.buildings.size || ch.removed.length || ch.meta || ch.log;
+  const any = players.length || moves.length || ch.tiles.size || ch.buildings.size || ch.removed.length || ch.meta || ch.log || ch.lobby;
   if (!any) return;
   s.seq++;
   const d: Delta = { t: "delta", seq: s.seq, gen: s.gen, tick: s.tick, players };
@@ -130,11 +153,13 @@ function flush(r: LiveRoom): void {
   if (ch.tiles.size) d.tiles = [...ch.tiles].map((i) => [i, s.tiles[i]]);
   if (ch.buildings.size) d.buildings = s.buildings.filter((b) => ch.buildings.has(b.id));
   if (ch.removed.length) d.removed = ch.removed;
+  if (ch.lobby) d.lobby = s.lobby;
   if (ch.meta) {
-    d.meta = { inventory: s.inventory, ledger: s.ledger, econ: s.econ, heat: s.heat, reserve: s.reserve, phase: s.phase, hostId: s.hostId };
+    const meta: NonNullable<Delta["meta"]> = { inventory: s.inventory, goods: s.goods, claims: s.claims, ops: s.ops, ledger: s.ledger, econ: s.econ, heat: s.heat, reserve: s.reserve, phase: s.phase, hostId: s.hostId };
     // the archive and history only ever grow: resend them only when they have
-    if (s.archive.length !== r.sentArchive) d.meta.archive = s.archive;
-    if (s.history.length !== r.sentHistory) d.meta.history = s.history;
+    if (s.archive.length !== r.sentArchive) meta.archive = s.archive;
+    if (s.history.length !== r.sentHistory) meta.history = s.history;
+    d.meta = meta;
     r.sentArchive = s.archive.length;
     r.sentHistory = s.history.length;
   }
@@ -270,7 +295,14 @@ export function attach(ws: WebSocket, ip: string): void {
       }
       if (!isRecord(msg.c) || typeof msg.c.k !== "string") return fail("malformed command");
       const res = applyCommand(room.s, c.pid, msg.id, msg.gen, msg.c, room.ch);
-      if (msg.c.k !== "move") send(c, res.ok ? { t: "ack", id: msg.id, ok: true } : { t: "ack", id: msg.id, ok: false, reason: res.reason });
+      if (msg.c.k !== "move") {
+        send(c, res.ok ? { t: "ack", id: msg.id, ok: true } : { t: "ack", id: msg.id, ok: false, reason: res.reason });
+        // refusals that touch someone else's ground or machine are worth narrating too
+        if (!res.ok && /'s (land|belt|cable|pipe|path)|only (its builder|they)|claim around/.test(res.reason)) {
+          const p = room.s.players[c.pid];
+          printEvents(room.s, [{ actor: c.pid, name: p?.name ?? "?", action: "refused", cmd: msg.c.k, reason: res.reason }]);
+        }
+      }
       return;
     }
     fail("unknown message");

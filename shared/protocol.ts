@@ -93,7 +93,7 @@ export interface Claim {
 
 export type LobbyTask =
   | { k: "idle" }
-  | { k: "walk"; x: number; y: number }
+  | { k: "walk"; x: number; y: number; i?: number }
   | { k: "plant"; i: number; got: number }
   | { k: "picket"; b: number; x: number; y: number };
 
@@ -184,6 +184,8 @@ export interface Econ {
   workersUsed: number;
   /** machines with a power need but no cable to a generator */
   unwired: number;
+  /** drawn from the Bottled Sun last economy tick */
+  drawn: number;
 }
 
 export interface StageSummary {

@@ -86,6 +86,45 @@ export function route(s: RoomState, kind: LineKind, from: [number, number], to: 
   return path.length <= MAX_LINE_TILES ? path : null;
 }
 
+/**
+ * Shortest orthogonal route for a line from any of `starts` to any of
+ * `goals` (tile indices), reusing tiles that already carry it. Used by the
+ * playtest bot to connect a machine to a grid; the server checks the path it
+ * sends like any other.
+ */
+export function routeBetween(s: RoomState, kind: LineKind, starts: number[], goals: Set<number>, pid: string | undefined): [number, number][] | null {
+  const ok = (i: number): boolean => lineTileProblem(s, kind, i % s.w, Math.floor(i / s.w), pid) === null;
+  const prev = new Map<number, number>();
+  const queue: number[] = [];
+  for (const i of starts) if (ok(i) && !prev.has(i)) {
+    prev.set(i, -1);
+    queue.push(i);
+  }
+  let hit = -1;
+  for (let qi = 0; qi < queue.length; qi++) {
+    const i = queue[qi];
+    if (goals.has(i)) {
+      hit = i;
+      break;
+    }
+    const x = i % s.w;
+    const y = Math.floor(i / s.w);
+    for (const [dx, dy] of DIRS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const ni = ny * s.w + nx;
+      if (!inBounds(s, nx, ny) || prev.has(ni) || !ok(ni)) continue;
+      prev.set(ni, i);
+      queue.push(ni);
+    }
+  }
+  if (hit < 0) return null;
+  const path: [number, number][] = [];
+  for (let i = hit; i !== -1; i = prev.get(i)!) path.push([i % s.w, Math.floor(i / s.w)]);
+  path.reverse();
+  return path.length <= MAX_LINE_TILES ? path : null;
+}
+
 /** Direction index from one tile to an orthogonal neighbour. */
 export const dirTo = (a: [number, number], b: [number, number]): 0 | 1 | 2 | 3 =>
   (DIRS.findIndex(([dx, dy]) => a[0] + dx === b[0] && a[1] + dy === b[1]) as 0 | 1 | 2 | 3);

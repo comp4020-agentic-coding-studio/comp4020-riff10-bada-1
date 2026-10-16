@@ -8,6 +8,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { RoomState } from "../shared/protocol.ts";
 import { SCHEMA_VERSION } from "../shared/protocol.ts";
+import { migrate } from "./migrate.ts";
 
 const dir = process.env.DATA_DIR ?? join(process.cwd(), "data");
 mkdirSync(dir, { recursive: true });
@@ -51,8 +52,10 @@ export function saveRoom(s: RoomState): void {
 export function loadRoom(code: string): RoomState | null {
   const row = select.get(code) as { schema: number; state: string } | undefined;
   if (!row) return null;
-  if (row.schema !== SCHEMA_VERSION) throw new Error(`room ${code} is schema ${row.schema}, server expects ${SCHEMA_VERSION}`);
-  return JSON.parse(row.state) as RoomState;
+  // an older room is brought forward (see server/migrate.ts); a newer one is refused rather than read wrongly
+  if (row.schema > SCHEMA_VERSION) throw new Error(`room ${code} is schema ${row.schema}, server expects ${SCHEMA_VERSION}`);
+  const state = JSON.parse(row.state);
+  return row.schema < SCHEMA_VERSION ? migrate(state, row.schema) : (state as RoomState);
 }
 
 export const roomExists = (code: string): boolean => exists.get(code) !== undefined;

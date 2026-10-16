@@ -66,6 +66,9 @@ const BUILD_LOOK: Record<BuildingType, { colour: string; roof: string; h: number
   plaza: { colour: "#e0c99a", roof: "#e8735a", h: 4 },
   depot: { colour: "#a58a5c", roof: "#6b5a3a", h: 24 },
   engine: { colour: "#6b6f88", roof: "#c9c4ff", h: 28 },
+  factory: { colour: "#b98b5e", roof: "#6a7d8c", h: 24 },
+  store: { colour: "#c9a36b", roof: "#8a6a3a", h: 10 },
+  intake: { colour: "#7fa6b8", roof: "#3d6a80", h: 12 },
 };
 
 export class Renderer {
