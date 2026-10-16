@@ -95,7 +95,8 @@ export type LobbyTask =
   | { k: "idle" }
   | { k: "walk"; x: number; y: number; i?: number }
   | { k: "plant"; i: number; got: number }
-  | { k: "picket"; b: number; x: number; y: number };
+  | { k: "picket"; b: number; x: number; y: number }
+  | { k: "rest"; until: number };
 
 export interface Lobbyist {
   id: number;

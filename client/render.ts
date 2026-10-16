@@ -243,7 +243,7 @@ export class Renderer {
     // overlays on the ground: survey, pressure, ghost footprint; then paths, claims and networks
     this.overlays(s, st, anim);
     this.lines(s, st, anim);
-    this.claims(s);
+    this.claims(s, false);
 
     // objects, depth sorted
     const items: { depth: number; draw: () => void }[] = [];
@@ -270,6 +270,7 @@ export class Renderer {
     }
     items.sort((a, b) => a.depth - b.depth);
     for (const it of items) it.draw();
+    this.claims(s, true);
     if (this.hint) this.label(this.hint.text, this.hint.x, this.hint.y, "#fffbe0", 12);
     this.hint = null;
 
@@ -773,18 +774,23 @@ export class Renderer {
         break;
       }
       case "factory": {
-        // a sawtooth roof and a chimney that puffs only while a batch runs
+        // three sawtooth roof lights along the top, a chimney that smokes only while a batch runs,
+        // and finished parts stacked by the door
         for (let k = 0; k < 3; k++) {
           const f = (k + 0.5) / 3;
-          const px = l[0] + (t[0] - l[0]) * f + (bb[0] - l[0]) * 0.5;
-          const py = l[1] + (t[1] - l[1]) * f + (bb[1] - l[1]) * 0.5;
-          this.poly([[px - 6 * z, py], [px + 2 * z, py - 8 * z], [px + 6 * z, py]], "#8fa5b5", OUTLINE);
+          const ax = l[0] + (bb[0] - l[0]) * f;
+          const ay = l[1] + (bb[1] - l[1]) * f;
+          const off = [(t[0] - l[0]) * 0.55, (t[1] - l[1]) * 0.55];
+          const p0: [number, number] = [ax + off[0] * 0.15, ay + off[1] * 0.15];
+          const p1: [number, number] = [ax + off[0], ay + off[1]];
+          this.poly([p0, p1, [p1[0], p1[1] - 9 * z], [p0[0], p0[1] - 3 * z]], "#b9cfdc", OUTLINE);
         }
-        ctx.fillStyle = "#5a4a3a";
-        ctx.fillRect(cx + 8 * z, cy - 20 * z, 5 * z, 16 * z);
-        if (b.job && !this.view.low && Math.random() < 0.15) this.fx.push({ x: b.x + 1, y: b.y, t0: performance.now(), colour: "rgba(200,200,210,0.5)", kind: "smoke", vx: 0.1, vy: -0.2 });
+        const [rx, ry] = [(t[0] + r[0]) / 2, (t[1] + r[1]) / 2];
+        this.poly([[rx - 3 * z, ry], [rx + 3 * z, ry], [rx + 3 * z, ry - 18 * z], [rx - 3 * z, ry - 18 * z]], "#5a4a3a", OUTLINE);
+        if (b.job && !this.view.low && Math.random() < 0.18) this.fx.push({ x: b.x + 1, y: b.y, t0: performance.now(), colour: "rgba(210,210,220,0.55)", kind: "smoke", vx: 0.1, vy: -0.25 });
         const made = Object.values(b.out ?? {}).reduce((a, v) => a + (v ?? 0), 0);
-        for (let k = 0; k < Math.min(6, made); k++) this.ellipse(cx - 12 * z + k * 4 * z, cy + 4 * z, 2 * z, 2 * z, "#e8c46a", OUTLINE);
+        const [dx0, dy0] = [(bb[0] + base[1][0]) / 2, (bb[1] + base[1][1]) / 2];
+        for (let k = 0; k < Math.min(6, made); k++) this.ellipse(dx0 - 8 * z + (k % 3) * 5 * z, dy0 + h * 0.75 - Math.floor(k / 3) * 4 * z, 2.4 * z, 1.6 * z, "#e8c46a", OUTLINE);
         break;
       }
       case "store": {
@@ -1012,21 +1018,24 @@ export class Renderer {
     void anim;
   }
 
-  /** Claims: the boundary in the owner's colour, and their name. */
-  private claims(s: Snapshot): void {
+  /** Claims: the boundary in the owner's colour on the ground, and their name over everything. */
+  private claims(s: Snapshot, labels: boolean): void {
     const ctx = this.ctx;
     for (const c of s.claims) {
       const owner = s.players[c.owner];
       const col = PLAYER_COLOURS[(owner?.colour ?? 7) % PLAYER_COLOURS.length];
       const pts = this.corners(c.x, c.y, CLAIM_SIZE);
+      if (labels) {
+        const [lx, ly] = pts[3];
+        this.label(`${owner?.name ?? "someone"}'s claim`, lx, ly + 6 * this.cam.zoom, "#ffffff", 10, col);
+        continue;
+      }
       ctx.setLineDash([6 * this.cam.zoom, 4 * this.cam.zoom]);
       this.poly(pts, "rgba(255,255,255,0.05)", col);
       ctx.lineWidth = 2.5 * this.cam.zoom;
       ctx.strokeStyle = col;
       ctx.stroke();
       ctx.setLineDash([]);
-      const [x, y] = pts[0];
-      this.label(`${owner?.name ?? "someone"}'s claim`, x, y - 8 * this.cam.zoom, "#ffffff", 10, col);
     }
   }
 

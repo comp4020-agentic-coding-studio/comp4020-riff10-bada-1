@@ -123,7 +123,8 @@ export function lobbyAct(s: RoomState, ch: Changes): void {
       const p = a.task;
       const t = s.tiles[p.i];
       const f = t.d;
-      const room = f && !t.b ? Math.min(LOBBY.plant, L.bank[f], t.init - t.amt, LOBBY.visit - p.got) : 0;
+      const turn = s.econTicks % LOBBY.every === a.id % LOBBY.every;
+      const room = f && !t.b ? Math.min(turn ? 1 : 0, L.bank[f], t.init - t.amt, LOBBY.visit - p.got) : 0;
       if (f && room > 0) {
         t.amt += room;
         L.bank[f] -= room;
@@ -134,7 +135,7 @@ export function lobbyAct(s: RoomState, ch: Changes): void {
         ch.tiles.add(p.i);
         ch.meta = true;
       }
-      if (!f || room <= 0 || p.got >= LOBBY.visit || t.amt >= t.init) {
+      if (!f || (room <= 0 && turn) || p.got >= LOBBY.visit || t.amt >= t.init) {
         if (p.got > 0 && f) {
           const where = placeName(s, p.i);
           const verb = f === "matter" ? "replanted" : f === "coolant" ? "refilled" : "backfilled";
@@ -142,10 +143,16 @@ export function lobbyAct(s: RoomState, ch: Changes): void {
           event(ch, `lobby:${a.name}`, a.name, "lobby_restore", { family: f, amount: p.got, x: p.i % s.w, y: Math.floor(p.i / s.w), bank_left: L.bank[f] });
           if (hashInt(s.tick + a.id) % 3 === 0) say(s, a, LOBBY.shouts[hashInt(a.id + s.tick) % LOBBY.shouts.length]);
         }
-        a.task = { k: "idle" };
+        // a rest between visits: repainting the placard, writing to the Cooperative
+        a.task = p.got > 0 ? { k: "rest", until: s.econTicks + LOBBY.rest } : { k: "idle" };
       }
       ch.lobby = true;
       continue;
+    }
+    if (a.task.k === "rest") {
+      if (s.econTicks < a.task.until) continue;
+      a.task = { k: "idle" };
+      ch.lobby = true;
     }
     if (a.task.k === "picket") {
       const b = s.buildings.find((q) => q.id === (a.task as { b: number }).b);

@@ -306,9 +306,10 @@ export const LOBBY = {
   speed: 2.2, // tiles a second
   /** economy ticks of picketing a site can take in all; while picketed it rises at half speed */
   picketTicks: 20,
-  /** units a lobbyist puts back per economy tick while planting, and at most per visit */
-  plant: 1,
+  /** a lobbyist puts back 1 unit every `every` economy ticks while planting, at most `visit` a visit, then rests */
+  every: 2,
   visit: 6,
+  rest: 12,
   /** what a replanted tile is called, by family */
   places: { matter: "grove", mineral: "ore pit", coolant: "pond" } as Record<Family, string>,
   signs: ["Leave it be", "Water for herons", "Trees not servers", "Enough is plenty", "Grow, don't mine"],

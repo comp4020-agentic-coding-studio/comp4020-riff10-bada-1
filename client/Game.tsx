@@ -473,8 +473,8 @@ export default function Game({ room, name }: { room: string; name: string }): Re
           <div className="col-left">
             <StagePanel s={s} />
             <Economy s={s} you={client.you} onMode={(mode) => client.send({ k: "set", mode })} />
-            {s.phase.k === "play" && <Memo s={s} you={client.you} />}
             {s.phase.k === "play" && (s.lobby.agents.length > 0 || s.lobby.bankStart.matter + s.lobby.bankStart.mineral + s.lobby.bankStart.coolant > 0) && <LobbyPanel s={s} />}
+            {s.phase.k === "play" && <Memo s={s} you={client.you} />}
           {st.id === "universe" && s.phase.k === "play" && <LastFrontier s={s} you={client.you} onVote={(on) => client.send({ k: "stop", on })} />}
           </div>
           <RoomPanel s={s} client={client} host={host} />
@@ -722,12 +722,12 @@ function Memo({ s, you }: { s: Snapshot; you: string }): ReactNode {
   const cooled = !!dc && dc.status === "ok";
   const automated = s.ops.firstAutomation !== null;
   const inspected = s.buildings.some((b) => b.type === "extractor" && complete(b));
-  const power = st.energySource === "bottled" ? `Cable machines to the ${n(st.id === "system" ? "depot" : "engine")}: it taps the Bottled Sun` : `Power them: a ${n("furnace")} (fast, smoky) or a ${n("solar")} (clean, slow)`;
+  const power = st.buildings.includes("furnace") ? `Power them: a ${n("furnace")} (fast, smoky) or a ${n("solar")} (clean, slow)` : `Power them: a ${n("solar")}, cabled in`;
   const steps: [string, boolean][] = [
     ...(st.mechanic === "pressure" ? ([[`Raise a ${n("habitat")}: nothing runs outside its air`, has("habitat")]] as [string, boolean][]) : []),
     [`Gather ${st.families.matter.label} and ${ore} (E): careful or intensive (M)`, s.ledger.matter.extracted + s.ledger.mineral.extracted >= 20 || has("city")],
     [`Build ${n("city")}: workers, no power needed`, has("city")],
-    ...(st.energySource === "local" ? ([[power, has("furnace") || has("solar")]] as [string, boolean][]) : []),
+    ...(st.energySource === "local" ? ([[power, has("furnace") || has("solar")]] as [string, boolean][]) : ([[`Cable machines to the ${n(st.id === "system" ? "depot" : "engine")}: it taps the Bottled Sun`, s.econ.drawn > 0 || s.ops.energyUsed > 0]] as [string, boolean][])),
     [`Build a ${n("factory")}, and cable it to power (L)`, cabled],
     [`Make ${st.goods.wire} and ${st.goods.frame}: load the factory (F), collect the parts`, parts],
     [`Claim a ${CLAIM_SIZE}×${CLAIM_SIZE} plot (C): the ${n("datacentre")} goes on your own ground`, claimed],
@@ -739,16 +739,20 @@ function Memo({ s, you }: { s: Snapshot; you: string }): ReactNode {
   void you;
   const next = steps.findIndex(([, done]) => !done);
   if (next === -1) return null;
+  // done steps fold into a count, so the next one is always in view
+  const done = steps.filter(([, d]) => d).length;
   return (
     <div className="panel memo">
       <h2>Cooperative memo</h2>
+      {done > 0 && <p className="small">✓ {done} of {steps.length} done</p>}
       <ol>
-        {steps.map(([text, done], i) => (
-          <li key={text} className={done ? "done" : i === next ? "next" : ""}>
-            {done ? "✓ " : ""}
-            {text}
-          </li>
-        ))}
+        {steps.map(([text, d], i) =>
+          d ? null : (
+            <li key={text} className={i === next ? "next" : ""}>
+              {text}
+            </li>
+          ),
+        )}
       </ol>
     </div>
   );
@@ -759,13 +763,15 @@ function LobbyPanel({ s }: { s: Snapshot }): ReactNode {
   const total = (b: typeof L.bank): number => b.matter + b.mineral + b.coolant;
   const st = STAGES[s.stage];
   const picket = L.agents.filter((a) => a.task.k === "picket").length;
+  const planting = L.agents.filter((a) => a.task.k === "plant").length;
   const restored = FAMILIES.reduce((a, f) => a + s.ledger[f].restored, 0);
   return (
     <div className="panel lobby-panel">
       <h2>The Green Lobby</h2>
       <p className="small">
         {L.agents.length ? `${L.agents.length} out (${L.agents.map((a) => a.name).join(", ")})` : L.spent ? "gone home: the seed bank is empty" : "not here yet"}
-        {picket ? `, ${picket} picketing` : ""}. Expect {lobbyTarget(s as RoomState)} while this goes on.
+        {planting ? `, ${planting} replanting` : ""}
+        {picket ? `, ${picket} picketing` : ""}. {L.agents.length ? `More come as factories and datacentres go up (${lobbyTarget(s as RoomState)} now).` : ""}
       </p>
       <p className="small">
         Seed bank: <strong>{total(L.bank)}</strong> of {total(L.bankStart)} left (
