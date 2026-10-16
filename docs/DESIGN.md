@@ -161,7 +161,18 @@ Measured headless with two bots per room on Earth's seed 7 at normal pace (`scri
 
 "Used" is useful stock extracted, "wasted" destroyed by intensive harvesting and smoke; both include the 168 units the Green Lobby put back. A useful factory arrives in the first minute and a rushed datacentre around two minutes for two to four players, a little ahead of the brief's three-to-five-minute target, which a human group that doesn't know the recipes will spend. The trade-off holds at every size: the rush reaches compute first and wastes about a quarter of the world; the green route spends longer on setup, wastes almost nothing, makes four times the parts and keeps its datacentre running for longer (green's ten-minute snapshot at two players: 36 parts, 5 kits fitted). A lone rusher stalls on furnace fuel and gets no automation at all; a lone green player is automating at six minutes.
 
-Whole campaigns at the rapid preset, two bots: the rush finishes all five worlds in about 11 minutes, the green route in about 18, both building a factory and a datacentre on every world and an automated line on most (Mars, where domes, datacentres and pumps fight over ice, is the hardest). An equal Bottled Sun makes measurably more parts through an efficient factory than a quick one before it runs out (asserted in the spec).
+Whole campaigns at the rapid preset, two bots: the rush finishes all five worlds in about 11 minutes, the green route in about 18, both building a factory and a datacentre on every world and an automated line on most (Mars, where domes, datacentres and pumps fight over ice, is the hardest). Late-stage endurance, the Solar System with the same Bottled Sun for both, two bots, rapid preset:
+
+| Reserve | Strategy | Reserve empty at | Datacentre ran | Parts | Wasted |
+| --- | --- | --- | --- | --- | --- |
+| 600 | rush | 37 s | 86 ticks | 11 | 431 |
+| 600 | green | 46 s | 105 ticks | 11 | 10 |
+| 1200 | rush | 53 s | 167 ticks | 11 | 458 |
+| 1200 | green | 64 s | 195 ticks | 11 | 20 |
+| 2400 | rush | never (world spent first) | 300 ticks | 11 | 448 |
+| 2400 | green | 100 s | 370 ticks | 27, 4 kits | 20 |
+
+The sustainable machine stretches the same reserve about a fifth further and keeps its datacentre running longer; with enough reserve it turns the surplus into kits. Cables are a real cost on a finite reserve: a third of what both drew was lost in long runs. And an efficient factory makes measurably more parts from an equal Bottled Sun than a quick one (asserted in the spec).
 
 Bots don't wander, admire or argue, and the hand baseline shows the floor: two people gathering alone spend a quarter of an hour on Earth. Progress scales with player count on purpose: more hands consume faster, and the stock doesn't grow to compensate. Re-measure with `node scripts/playbot.ts` or the spec's own campaign tests after changing `shared/content.ts`.
 

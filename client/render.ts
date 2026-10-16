@@ -669,6 +669,11 @@ export class Renderer {
       ctx.textBaseline = "middle";
       ctx.fillText(b.status.startsWith("throttled") ? "~" : "!", cx, cy - h - 16 * z + bob);
     }
+    // with the network view on, a power break or an overloaded grid is spelled out on the machine itself
+    if (done && (this.view.networks || this.view.tool === "line") && /no power|not cabled|tank empty|hopper full|Bottled Sun is empty/.test(b.status)) {
+      const why = b.status.includes("not cabled") ? "⚡✕ not cabled" : b.status.includes("overloaded") || b.status.includes("to spare") ? "⚡ grid overloaded" : b.status.includes("tank") ? "💧 tank empty" : b.status.includes("hopper") ? "▣ hopper full" : "⚡ reserve empty";
+      this.label(why, cx, cy + 6 * z, "#ffd1cc", 10);
+    }
     if (this.view.selected === b.id) this.poly([T, R, B, L], "rgba(255,255,255,0.15)", "#fffbe0");
     ctx.globalAlpha = 1;
   }
