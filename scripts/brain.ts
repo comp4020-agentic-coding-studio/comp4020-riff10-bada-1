@@ -115,7 +115,9 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     if (a) return out.concat(a);
   }
   // 3b. more power when a grid is overloaded (the Sun's collectors heat things up, so radiators come with them)
-  const starved = ours.some((b) => complete(b) && /no power: its grid is overloaded|no power to spare/.test(b.status));
+  // more generators only help when the ones there are actually burning: a furnace out of fuel needs timber, not company
+  const fuelless = ours.some((b) => b.type === "furnace" && b.status.includes("to burn"));
+  const starved = !fuelless && ours.some((b) => complete(b) && /no power: its grid is overloaded|no power to spare/.test(b.status));
   if (powerKind && starved && has(powerKind).length < 5 && has(powerKind).every(complete)) {
     const a = build(powerKind, findSpot(s, powerKind, base, pid, airOk(s)));
     if (a) return out.concat(a);
@@ -124,6 +126,7 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     const a = build("radiator", findSpot(s, "radiator", base, pid));
     if (a) return out.concat(a);
   }
+  if (fuelless && s.inventory.matter < 4) return out.concat(gather(s, pid, mem, { matter: 12 }));
   // 4. a factory
   if (!has("factory").length) {
     const a = build("factory", findSpot(s, "factory", base, pid, airOk(s)));
@@ -174,7 +177,7 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
   const dcs = has("datacentre");
   const parts = (NEXT_DATACENTRE.wire ?? 0) + (NEXT_DATACENTRE.frame ?? 0);
   // 7. feed the factory and collect its parts, until the first datacentre is paid for
-  if (factory && (dcs.length === 0 || (strat === "green" && !factory.kit))) {
+  if (factory && (dcs.length === 0 || (strat === "green" && !factory.kit && factory.recipe !== "kit"))) {
     const outQ = Object.values(factory.out ?? {}).reduce((a, v) => a + (v ?? 0), 0);
     const goodsHave = have(s, "wire") + have(s, "frame");
     const next = nextRecipe(s, factory);
@@ -183,7 +186,7 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     if ((outQ > 0 || canLoad) && !tried(`t${factory.id}`)) return out.concat(tend(factory));
     if (missing.length && goodsHave < parts && !s.claims.some((c) => c.owner === pid && strat !== "green")) {
       const want: Cost = {};
-      for (const [k, v] of missing) want[k as Item] = (v ?? 0) * 2;
+      for (const [k, v] of missing) if ((FAMILIES as readonly string[]).includes(k)) want[k as Item] = (v ?? 0) * 2;
       return out.concat(gather(s, pid, mem, want));
     }
   }
@@ -206,9 +209,10 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
     }
   }
   const dc = done("datacentre")[0];
-  // 9. green: make a kit and fit it, before the rest
+  // 9. green: make a kit (2 wire + 1 frame) and fit it, factory first, then the datacentre and harvesters
   if (strat === "green" && factory && dc) {
     const target = [factory, dc, ...done("extractor")].find((b) => !b.kit);
+    const kitOut = factory.out?.kit ?? 0;
     if (target && s.goods.kit > 0) {
       const [cx, cy] = centreOf(target);
       if (!within(cx, cy, 6)) return out.concat(walkTo(cx, cy));
@@ -216,30 +220,19 @@ export function decide(s: RoomState, pid: string, strat: Strategy, mem: Memory):
         mem.failed.set(`u${target.id}`, mem.step + 4);
         return out.concat([stop, { k: "upgrade", x: target.x, y: target.y }]);
       }
-    }
-    if (target && s.goods.kit === 0) {
-      if (factory.recipe !== "kit" && !tried(`r${factory.id}`)) {
-        mem.failed.set(`r${factory.id}`, mem.step + 4);
-        return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe: "kit", target: 1 }]);
+    } else if (target) {
+      const wantKit = have(s, "wire") + (factory.buf?.wire ?? 0) >= 2 && have(s, "frame") + (factory.buf?.frame ?? 0) >= 1;
+      const recipe = wantKit || factory.job?.r === "kit" || kitOut > 0 ? "kit" : "auto";
+      if (factory.recipe !== recipe && !tried(`r${factory.id}${recipe}`)) {
+        mem.failed.set(`r${factory.id}${recipe}`, mem.step + 6);
+        return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe, target: recipe === "kit" ? 1 : 0 }]);
       }
-      // a kit takes 2 wire and a frame: switch back to parts when it can't make one
-      const kitIn = (factory.buf?.wire ?? 0) >= 2 && (factory.buf?.frame ?? 0) >= 1;
-      const parts2 = have(s, "wire") >= 2 && have(s, "frame") >= 1;
-      if (!kitIn && !factory.job && parts2 && !tried(`t${factory.id}`)) {
+      const bufQ = Object.values(factory.buf ?? {}).reduce((a, v) => a + (v ?? 0), 0);
+      if ((kitOut > 0 || (recipe === "kit" && !factory.job && wantKit) || (recipe === "auto" && bufQ < 4 && (s.inventory.mineral >= 3 || s.inventory.matter >= 3)) || Object.values(factory.out ?? {}).some((v) => (v ?? 0) > 0)) && !tried(`t${factory.id}`))
         return out.concat(tend(factory));
-      }
-      if (!kitIn && !factory.job && !parts2 && (factory.out?.kit ?? 0) === 0) {
-        if (!tried(`ra${factory.id}`)) {
-          mem.failed.set(`ra${factory.id}`, mem.step + 30);
-          return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe: "auto" }]);
-        }
-      }
-      if ((factory.out?.kit ?? 0) > 0 && !tried(`t${factory.id}`)) {
-        return out.concat(tend(factory));
-      }
-    }
-    if (!target && factory.recipe === "kit" && !tried(`ra${factory.id}`)) {
-      mem.failed.set(`ra${factory.id}`, mem.step + 30);
+      if (recipe === "auto" && bufQ < 4) return out.concat(gather(s, pid, mem, { mineral: 8, matter: 6 }));
+    } else if (factory.recipe === "kit" && !tried(`r${factory.id}auto`)) {
+      mem.failed.set(`r${factory.id}auto`, mem.step + 30);
       return out.concat([{ k: "set", x: factory.x, y: factory.y, recipe: "auto", target: 0 }]);
     }
   }
@@ -344,8 +337,7 @@ function gather(s: RoomState, pid: string, mem: Memory, cost: Cost | null): Act 
     return best;
   };
   // coolant is only gathered when it's what's wanted: hand-scooping the pond starves the pumps
-  let i = pick(fam);
-  if (i < 0 && !fam) i = pickDry();
+  let i = fam ? pick(fam) : pickDry();
   if (i < 0) i = pick(null);
   if (i < 0) return [{ k: "move", dx: 0, dy: 0 }];
   const [x, y] = [i % s.w, Math.floor(i / s.w)];

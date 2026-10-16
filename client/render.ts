@@ -3,18 +3,26 @@
 // visual bible (rounded forms, a soft dark outline, warm light from the upper
 // left, one palette per stage that drains toward its "dead" colour as tiles
 // lose life), so every asset is code in this file and replaceable in one place.
-import { BUILDINGS, STAGES, type BuildingType, type Family, type StageDef } from "../shared/content.ts";
-import type { Building, Player, Snapshot, Tile } from "../shared/protocol.ts";
-import { averageLife, effectiveLife, lifeCap, placementProblem } from "../shared/sim.ts";
+import { BUILDINGS, CLAIM_SIZE, LINES, STAGES, itemLabel, type BuildingType, type Family, type LineKind, type StageDef } from "../shared/content.ts";
+import type { Building, Lobbyist, Player, Snapshot, Tile } from "../shared/protocol.ts";
+import { averageLife, buildCost, claimProblem, effectiveLife, lifeCap, placementProblem, shortfalls } from "../shared/sim.ts";
+import { DIRS, claimAt, linePathProblem, route } from "../shared/layout.ts";
+import { complete, isIdle, isRunning } from "../shared/world.ts";
 import type { RoomState } from "../shared/protocol.ts";
 import { TH, TW, screenToTile, toScreen, toWorld, type Camera } from "./iso.ts";
 import type { GameClient } from "./net.ts";
 
-export type Tool = "harvest" | "build" | "inspect" | "demolish" | "mark";
+export type Tool = "harvest" | "build" | "inspect" | "demolish" | "mark" | "claim" | "line" | "tend";
 
 export interface View {
   tool: Tool;
   build: BuildingType | null;
+  /** build the efficient version (costs parts, kit built in) */
+  eff: boolean;
+  /** the line being laid: its kind, quality, and the start tile once one is picked */
+  line: { kind: LineKind; q: 0 | 1; from: [number, number] | null } | null;
+  /** show cables, pipes and belts over everything */
+  networks: boolean;
   hover: [number, number] | null;
   /** keyboard placement: the tile in front of the avatar, used when the mouse is idle */
   keyboardTarget: boolean;
@@ -232,8 +240,10 @@ export class Renderer {
       }
     }
 
-    // overlays on the ground: survey, pressure, ghost footprint
+    // overlays on the ground: survey, pressure, ghost footprint; then paths, claims and networks
     this.overlays(s, st, anim);
+    this.lines(s, st, anim);
+    this.claims(s);
 
     // objects, depth sorted
     const items: { depth: number; draw: () => void }[] = [];
@@ -252,6 +262,11 @@ export class Renderer {
       const pos = p.id === this.client.you ? [this.client.me.x, this.client.me.y] : this.client.position(p.id);
       if (!pos) continue;
       items.push({ depth: pos[0] + pos[1] + 0.5, draw: () => this.player(st, p, pos[0], pos[1], anim) });
+    }
+    for (const a of s.lobby.agents) {
+      const [lx, ly] = this.client.lobbyPosition(a.id, a.x, a.y);
+      if (!visible(lx, ly)) continue;
+      items.push({ depth: lx + ly + 0.5, draw: () => this.lobbyist(st, a, lx, ly, anim) });
     }
     items.sort((a, b) => a.depth - b.depth);
     for (const it of items) it.draw();
@@ -583,8 +598,8 @@ export class Renderer {
     const def = BUILDINGS[b.type];
     const n = def.size;
     const look = BUILD_LOOK[b.type];
-    const done = b.work >= def.build * 10;
-    const ok = b.status === "ok";
+    const done = complete(b);
+    const ok = isRunning(b);
     ctx.globalAlpha = faded ? 0.4 : 1;
     const [T, R, B, L] = this.corners(b.x, b.y, n).map(([x, y]) => [x, y] as [number, number]);
     const inset = (p: [number, number], k = 0.12): [number, number] => {
@@ -593,7 +608,7 @@ export class Renderer {
       return [p[0] + (cx - p[0]) * k, p[1] + (cy - p[1]) * k];
     };
     const t = inset(T), r = inset(R), bb = inset(B), l = inset(L);
-    const progress = Math.min(1, b.work / Math.max(1, def.build * 10));
+    const progress = Math.min(1, b.work / Math.max(1, b.need ?? def.build * 10));
     const h = look.h * z * (done ? 1 : 0.25 + 0.75 * progress) * (b.type === "city" && b.status.startsWith("unserved") ? 0.75 : 1);
     const up = (p: [number, number], k = h): [number, number] => [p[0], p[1] - k];
     const [cx, cy] = [(T[0] + B[0]) / 2, (T[1] + B[1]) / 2];
@@ -644,7 +659,7 @@ export class Renderer {
     }
 
     // idle marker: a glyph and text-backed status, never colour alone
-    if (!ok && done) {
+    if (done && isIdle(b)) {
       const bob = Math.sin(anim * 3) * 2 * z;
       this.ellipse(cx, cy - h - 16 * z + bob, 9 * z, 9 * z, "#fffdf3", OUTLINE);
       ctx.fillStyle = "#3a2c2c";
@@ -757,6 +772,31 @@ export class Renderer {
         }
         break;
       }
+      case "factory": {
+        // a sawtooth roof and a chimney that puffs only while a batch runs
+        for (let k = 0; k < 3; k++) {
+          const f = (k + 0.5) / 3;
+          const px = l[0] + (t[0] - l[0]) * f + (bb[0] - l[0]) * 0.5;
+          const py = l[1] + (t[1] - l[1]) * f + (bb[1] - l[1]) * 0.5;
+          this.poly([[px - 6 * z, py], [px + 2 * z, py - 8 * z], [px + 6 * z, py]], "#8fa5b5", OUTLINE);
+        }
+        ctx.fillStyle = "#5a4a3a";
+        ctx.fillRect(cx + 8 * z, cy - 20 * z, 5 * z, 16 * z);
+        if (b.job && !this.view.low && Math.random() < 0.15) this.fx.push({ x: b.x + 1, y: b.y, t0: performance.now(), colour: "rgba(200,200,210,0.5)", kind: "smoke", vx: 0.1, vy: -0.2 });
+        const made = Object.values(b.out ?? {}).reduce((a, v) => a + (v ?? 0), 0);
+        for (let k = 0; k < Math.min(6, made); k++) this.ellipse(cx - 12 * z + k * 4 * z, cy + 4 * z, 2 * z, 2 * z, "#e8c46a", OUTLINE);
+        break;
+      }
+      case "store": {
+        this.poly([[cx - 7 * z, cy - 2 * z], [cx, cy - 6 * z], [cx + 7 * z, cy - 2 * z], [cx, cy + 2 * z]], "#a8814a", OUTLINE);
+        break;
+      }
+      case "intake": {
+        const full = Math.min(1, (b.tank ?? 0) / 20);
+        this.ellipse(cx, cy - 4 * z, 6 * z, 3 * z, "#2d4a5a", OUTLINE);
+        this.ellipse(cx, cy - 4 * z, 6 * z * full, 3 * z * full, "#7fd0f0");
+        break;
+      }
       case "plaza": {
         const cols = ["#e8735a", "#f2c14e", "#4f9de0", "#8fcf6a"];
         for (let k = 0; k < 4; k++) {
@@ -861,7 +901,12 @@ export class Renderer {
         for (let x = Math.round(px) - r; x <= Math.round(px) + r; x++) {
           if (x < 0 || y < 0 || x >= s.w || y >= s.w || Math.hypot(x - px, y - py) > 2.1) continue;
           const t = s.tiles[y * s.w + x];
-          if (t.d && t.amt > 0) return `E: harvest ${st.families[t.d].label}`;
+          if (t.d && t.amt > 0) {
+            const me = s.players[this.client.you];
+            const y = s.pace === "rapid" ? 10 : 1;
+            const m = me?.mode === "intensive" ? `+${2 * y}, wastes ${y}` : `+${y}`;
+            return `E: harvest ${st.families[t.d].label} (${m}) · M: ${me?.mode === "intensive" ? "careful" : "intensive"}`;
+          }
           const b = t.b ? s.buildings.find((q) => q.id === t.b) : undefined;
           if (b && b.work < BUILDINGS[b.type].build * 10) return "E: help build";
         }
@@ -892,15 +937,163 @@ export class Renderer {
     ctx.fillText(text, x + (bg ? 2 : 0), y + 0.5);
   }
 
+  /** Paths always; cables, pipes and belts too, faintly unless the network view is on. */
+  private lines(s: Snapshot, st: StageDef, anim: number): void {
+    const ctx = this.ctx;
+    const z = this.cam.zoom;
+    const show = this.view.networks || this.view.tool === "line";
+    const at = (x: number, y: number, dx = 0, dy = 0): [number, number] => toScreen(this.cam, ...toWorld(x + dx, y + dy));
+    const seg = (x: number, y: number, kind: "cb" | "pp" | "bt", colour: string, width: number, dash: number[], off: [number, number]): void => {
+      const t = s.tiles[y * s.w + x];
+      const [cx, cy] = at(x + off[0], y + off[1]);
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = width * z;
+      ctx.setLineDash(dash.map((d) => d * z));
+      let any = false;
+      for (const [dx, dy] of DIRS) {
+        const n = s.tiles[(y + dy) * s.w + x + dx];
+        if (x + dx < 0 || y + dy < 0 || x + dx >= s.w || y + dy >= s.w) continue;
+        const joins = n && (n[kind] || (n.b && (kind !== "bt" || (t.bt && DIRS[t.bt.d][0] === dx && DIRS[t.bt.d][1] === dy))));
+        if (!joins) continue;
+        any = true;
+        const [ex, ey] = at(x + off[0] + dx * 0.5, y + off[1] + dy * 0.5);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      }
+      if (!any) this.ellipse(cx, cy, width * z, width * z * 0.6, colour);
+      ctx.setLineDash([]);
+    };
+    for (let i = 0; i < s.tiles.length; i++) {
+      const t = s.tiles[i];
+      if (!t.pa && !t.cb && !t.pp && !t.bt) continue;
+      const x = i % s.w;
+      const y = Math.floor(i / s.w);
+      if (t.pa) {
+        // a path: rough track is a trampled strip, a laid path is paved stones
+        const pts = this.corners(x, y).map(([px, py], k, all) => {
+          const [mx, my] = [(all[0][0] + all[2][0]) / 2, (all[0][1] + all[2][1]) / 2];
+          return [px + (mx - px) * 0.35, py + (my - py) * 0.35] as [number, number];
+        });
+        this.poly(pts, t.pa[1] ? "rgba(214,200,170,0.95)" : "rgba(150,118,84,0.7)", t.pa[1] ? "rgba(120,100,80,0.5)" : undefined);
+      }
+      ctx.globalAlpha = show ? 1 : 0.55;
+      if (t.cb) seg(x, y, "cb", "#3a3030", 1.6, [], [-0.18, -0.18]);
+      if (t.pp) seg(x, y, "pp", t.pp[1] ? "#4fa3c8" : "#8ab8cc", t.pp[1] ? 3.2 : 2.4, t.pp[1] ? [] : [4, 2], [0.18, -0.18]);
+      if (t.bt) {
+        seg(x, y, "bt", t.bt.q ? "#6e6a7a" : "#8a7a60", t.bt.q ? 5 : 4, [], [0, 0.15]);
+        // an arrow for its direction (and a cross when it's blocked), so the state isn't colour alone
+        const [d0, d1] = DIRS[t.bt.d];
+        const [ax, ay] = at(x, y, 0.15 * d0, 0.15 + 0.15 * d1);
+        const [bx, by] = at(x, y, -0.15 * d0, 0.15 - 0.15 * d1);
+        const ang = Math.atan2(ay - by, ax - bx);
+        ctx.fillStyle = t.bt.bk ? "#c0392b" : "#fff6d8";
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(ax - Math.cos(ang - 0.5) * 6 * z, ay - Math.sin(ang - 0.5) * 6 * z);
+        ctx.lineTo(ax - Math.cos(ang + 0.5) * 6 * z, ay - Math.sin(ang + 0.5) * 6 * z);
+        ctx.fill();
+        if (t.bt.it && t.bt.n > 0) {
+          const [ix, iy] = at(x, y, 0, 0.15);
+          const col = t.bt.it in st.palette ? st.palette[t.bt.it as Family] : "#e8c46a";
+          for (let k = 0; k < t.bt.n; k++) this.ellipse(ix + (k - (t.bt.n - 1) / 2) * 5 * z, iy - 3 * z, 3 * z, 2.4 * z, col, OUTLINE);
+        }
+        if (t.bt.bk && show) this.label("✕ blocked", ...at(x, y, 0, 0.3), "#ffd1cc", 9);
+      }
+      ctx.globalAlpha = 1;
+    }
+    void anim;
+  }
+
+  /** Claims: the boundary in the owner's colour, and their name. */
+  private claims(s: Snapshot): void {
+    const ctx = this.ctx;
+    for (const c of s.claims) {
+      const owner = s.players[c.owner];
+      const col = PLAYER_COLOURS[(owner?.colour ?? 7) % PLAYER_COLOURS.length];
+      const pts = this.corners(c.x, c.y, CLAIM_SIZE);
+      ctx.setLineDash([6 * this.cam.zoom, 4 * this.cam.zoom]);
+      this.poly(pts, "rgba(255,255,255,0.05)", col);
+      ctx.lineWidth = 2.5 * this.cam.zoom;
+      ctx.strokeStyle = col;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const [x, y] = pts[0];
+      this.label(`${owner?.name ?? "someone"}'s claim`, x, y - 8 * this.cam.zoom, "#ffffff", 10, col);
+    }
+  }
+
+  private lobbyist(st: StageDef, a: Lobbyist, x: number, y: number, anim: number): void {
+    const ctx = this.ctx;
+    const z = this.cam.zoom;
+    const [cx, cy0] = toScreen(this.cam, ...toWorld(x, y));
+    const moving = a.task.k === "walk";
+    const bob = moving ? Math.abs(Math.sin(anim * 9 + a.id)) * 2.5 * z : 0;
+    const cy = cy0 - bob;
+    this.ellipse(cx, cy0, 8 * z, 3.5 * z, "rgba(0,0,0,0.2)");
+    // green overalls, a straw hat, and a placard on a stick: clearly not a player
+    ctx.fillStyle = "#3a2c2c";
+    ctx.fillRect(cx - 3.5 * z, cy - 4 * z, 3 * z, 4 * z);
+    ctx.fillRect(cx + 0.5 * z, cy - 4 * z, 3 * z, 4 * z);
+    this.ellipse(cx, cy - 11 * z, 7 * z, 8 * z, "#4c9a52", OUTLINE);
+    this.ellipse(cx, cy - 22 * z, 6.5 * z, 6 * z, "#f0d2b0", OUTLINE);
+    this.ellipse(cx, cy - 26 * z, 10 * z, 2.5 * z, "#e8cf7a", OUTLINE);
+    this.ellipse(cx, cy - 28 * z, 5 * z, 3 * z, "#e8cf7a", OUTLINE);
+    ctx.strokeStyle = "#7a5233";
+    ctx.lineWidth = 1.6 * z;
+    ctx.beginPath();
+    ctx.moveTo(cx + 9 * z, cy - 6 * z);
+    ctx.lineTo(cx + 9 * z, cy - 34 * z);
+    ctx.stroke();
+    ctx.font = `700 ${Math.round(8 * Math.max(0.8, z))}px system-ui, sans-serif`;
+    const w = Math.max(28 * z, ctx.measureText(a.sign).width + 6);
+    ctx.fillStyle = "#fffaf0";
+    ctx.strokeStyle = "#4c9a52";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(cx + 9 * z - w / 2, cy - 46 * z, w, 12 * z, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#2a5a30";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(a.sign, cx + 9 * z, cy - 40 * z);
+    this.label(`${a.name} · Green Lobby`, cx, cy - 56 * z, "#d8ffdc", 10);
+    if (a.task.k === "plant") {
+      // a watering can or trowel, by what it's putting back
+      const t = this.client.state?.tiles[a.task.i];
+      const col = t?.d ? st.palette[t.d] : "#4c9a52";
+      for (let k = 0; k < 3; k++) {
+        const ph = (anim * 1.5 + k / 3) % 1;
+        this.ellipse(cx - 10 * z, cy - 8 * z + ph * 10 * z, 1.5 * z, 1.5 * z, col);
+      }
+    }
+    if (a.say) {
+      ctx.font = `600 ${Math.round(11 * Math.max(0.8, Math.min(1.3, z)))}px system-ui, sans-serif`;
+      const tw = ctx.measureText(a.say).width + 12;
+      ctx.fillStyle = "#fffdf3";
+      ctx.strokeStyle = OUTLINE;
+      ctx.beginPath();
+      ctx.roundRect(cx - tw / 2 - 14 * z, cy - 78 * z, tw, 16 * z, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#2b2533";
+      ctx.fillText(a.say, cx - 14 * z, cy - 70 * z);
+    }
+  }
+
   private ghost(s: Snapshot, st: StageDef): void {
     const tgt = this.target();
     if (!tgt) return;
     const [x, y] = tgt;
     const ctx = this.ctx;
+    const me = s.players[this.client.you];
+    const here = me ? { ...me, x: this.client.me.x, y: this.client.me.y } : undefined;
     if (this.view.tool === "build" && this.view.build) {
       const def = BUILDINGS[this.view.build];
-      const me = s.players[this.client.you];
-      const problem = placementProblem(s as RoomState, this.view.build, x, y, me ? { ...me, x: this.client.me.x, y: this.client.me.y } : undefined);
+      const eff = this.view.eff && !!def.kit;
+      const problem = placementProblem(s as RoomState, this.view.build, x, y, here, eff);
       const pts = this.corners(x, y, def.size);
       this.poly(pts, problem ? "rgba(230,80,70,0.35)" : "rgba(120,230,140,0.35)", problem ? "#ff6b5a" : "#bfffc8");
       const [T, , B] = pts;
@@ -910,7 +1103,46 @@ export class Renderer {
       const h = BUILD_LOOK[this.view.build].h * this.cam.zoom;
       this.poly([[cx, cy - h - 10], [pts[1][0], pts[1][1] - h], [cx, B[1] - h], [pts[3][0], pts[3][1] - h]], BUILD_LOOK[this.view.build].roof);
       ctx.globalAlpha = 1;
-      this.label(problem ? `✕ ${problem}` : `✓ place ${st.names[this.view.build] ?? this.view.build}`, cx, cy + 24 * this.cam.zoom, problem ? "#ffd1cc" : "#d8ffdc", 12);
+      // every shortage at once, not just the first
+      const short = shortfalls(s as RoomState, buildCost(this.view.build, eff));
+      const text = problem && /^needs /.test(problem) && short.length > 1 ? `✕ needs ${short.join(", ")}` : problem ? `✕ ${problem}` : `✓ place ${eff ? "an efficient " : ""}${st.names[this.view.build] ?? this.view.build}`;
+      this.label(text, cx, cy + 24 * this.cam.zoom, problem ? "#ffd1cc" : "#d8ffdc", 12);
+      const needs: string[] = [];
+      if (def.energy < 0) needs.push(`${-def.energy} power by cable`);
+      if (def.workers < 0) needs.push(`${-def.workers} workers`);
+      if (def.compute < 0) needs.push(`${-def.compute} compute`);
+      if (def.coolantUse) needs.push(`${st.families.coolant.label} piped or filled`);
+      if (needs.length) this.label(`runs on: ${needs.join(", ")}`, cx, cy + 40 * this.cam.zoom, "#fffbe0", 10);
+    } else if (this.view.tool === "claim" && me) {
+      const owned = claimAt(s, x, y);
+      if (owned) {
+        const pts = this.corners(owned.x, owned.y, CLAIM_SIZE);
+        const yours = owned.owner === me.id;
+        this.poly(pts, "rgba(255,255,255,0.12)", yours ? "#ffd27a" : "#ff6b5a");
+        const [T, , B] = pts;
+        this.label(yours ? "click to give up this claim" : `✕ that's ${s.players[owned.owner]?.name ?? "someone"}'s land`, (T[0] + B[0]) / 2, (T[1] + B[1]) / 2, yours ? "#fffbe0" : "#ffd1cc", 12);
+      } else {
+        const problem = claimProblem(s as RoomState, x - 1, y - 1, here!);
+        const pts = this.corners(x - 1, y - 1, CLAIM_SIZE);
+        this.poly(pts, problem ? "rgba(230,80,70,0.25)" : "rgba(255,220,120,0.25)", problem ? "#ff6b5a" : "#ffd27a");
+        const [T, , B] = pts;
+        this.label(problem ? `✕ ${problem}` : `✓ claim this ${CLAIM_SIZE}×${CLAIM_SIZE}`, (T[0] + B[0]) / 2, (T[1] + B[1]) / 2, problem ? "#ffd1cc" : "#fff3c8", 12);
+      }
+    } else if (this.view.tool === "line" && this.view.line && x >= 0 && y >= 0 && x < s.w && y < s.w) {
+      const ln = this.view.line;
+      const from = ln.from ?? [x, y];
+      const path = route(s as RoomState, ln.kind, from, [x, y], this.client.you);
+      const problem = path ? linePathProblem(s as RoomState, ln.kind, path, here) : "no clear route there (32 tiles at most, around buildings)";
+      for (const [px, py] of path ?? [[x, y]]) this.poly(this.corners(px, py), problem ? "rgba(230,80,70,0.3)" : "rgba(255,255,200,0.3)", problem ? "#ff6b5a" : "#fffbe0");
+      const fresh = (path ?? []).filter(([px, py]) => {
+        const t = s.tiles[py * s.w + px];
+        return ln.kind === "cable" ? !t.cb : ln.kind === "pipe" ? !t.pp : ln.kind === "belt" ? !t.bt : !t.pa;
+      }).length;
+      const unit = LINES[ln.kind].cost[ln.q]!;
+      const cost = Object.entries(unit).map(([k, v]) => `${(v ?? 0) * fresh} ${itemLabel(st, k as Family)}`).join(", ");
+      const [cx, cy] = toScreen(this.cam, ...toWorld(x, y));
+      const name = LINES[ln.kind].q[ln.q];
+      this.label(problem ? `✕ ${problem}` : ln.from ? `${name}: ${fresh} new tile${fresh === 1 ? "" : "s"}, ${cost || "free"}. Click to lay` : `${name}: click where it starts`, cx, cy + 22 * this.cam.zoom, problem ? "#ffd1cc" : "#fffbe0", 12);
     } else if (x >= 0 && y >= 0 && x < s.w && y < s.w) {
       const stroke = this.view.tool === "demolish" ? "#ff8a7a" : this.view.tool === "mark" ? "#ffd27a" : "rgba(255,255,240,0.9)";
       this.poly(this.corners(x, y), "rgba(255,255,255,0.08)", stroke);

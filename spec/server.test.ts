@@ -35,6 +35,7 @@ class Bot {
         for (const [i, t] of m.tiles ?? []) this.snap.tiles[i] = t;
         for (const p of m.players) this.snap.players[p.id] = p;
         for (const [id, x, y] of m.moves ?? []) Object.assign(this.snap.players[id] ?? {}, { x, y });
+        if (m.meta) Object.assign(this.snap, m.meta);
       }
       for (const w of this.waiters.splice(0)) w();
     });
@@ -79,6 +80,7 @@ class Bot {
 }
 
 const originOf = (url: string): string => new URL(url).origin;
+const extracted = (s: Snapshot): number => s.ledger.matter.extracted + s.ledger.mineral.extracted + s.ledger.coolant.extracted;
 
 async function newRoom(url: string, pace = "normal"): Promise<string> {
   const res = await fetch(new URL("/api/rooms", url), { method: "POST", headers: { origin: originOf(url), "content-type": "application/json" }, body: JSON.stringify({ pace }) });
@@ -174,7 +176,9 @@ describe("real time", () => {
     a.cmd({ k: "harvest", x, y }, "dup-1");
     await a.until((m) => m.t === "ack" && m.id === "dup-1" && a.msgs.filter((q) => q.t === "ack" && q.id === "dup-1").length === 2);
     await new Promise((r) => setTimeout(r, 300));
-    expect(a.snap!.tiles[idx].amt).toBe(before - 1);
+    // the ledger, not the tile: the Green Lobby may replant the tile meanwhile, but only a harvest extracts
+    expect(extracted(a.snap!)).toBe(1);
+    void before;
     const welcomes = a.msgs.filter((m) => m.t === "welcome").length;
     a.cmd({ k: "harvest", x, y }, "stale-1", "not-this-incarnation");
     const ack = await a.until((m) => m.t === "ack" && m.id === "stale-1");
@@ -249,14 +253,13 @@ describe("persistence", () => {
     const idx = y * a.snap!.w + x;
     a.cmd({ k: "harvest", x, y }, "h1");
     await a.until((m) => m.t === "delta" && !!m.tiles?.some(([i]) => i === idx));
-    const amt = a.snap!.tiles[idx].amt;
     const { token, you, inc } = a;
     await stop(p, "SIGTERM");
     p = await boot();
     const back = await joined(url, room, "Ada", token);
     expect(back.you).toBe(you);
     expect(back.inc).not.toBe(inc);
-    expect(back.snap!.tiles[idx].amt).toBe(amt);
+    expect(extracted(back.snap!)).toBe(1);
     back.close();
     await stop(p, "SIGTERM");
   }, 30_000);
@@ -269,12 +272,11 @@ describe("persistence", () => {
     const idx = y * a.snap!.w + x;
     a.cmd({ k: "harvest", x, y }, "h1");
     await a.until((m) => m.t === "delta" && !!m.tiles?.some(([i]) => i === idx));
-    const amt = a.snap!.tiles[idx].amt;
     await new Promise((r) => setTimeout(r, 6000)); // > the 5 s save interval
     await stop(p, "SIGKILL");
     p = await boot();
     const back = await joined(url, room, "Ada", a.token);
-    expect(back.snap!.tiles[idx].amt).toBe(amt);
+    expect(extracted(back.snap!)).toBe(1);
     back.close();
     await stop(p, "SIGTERM");
   }, 45_000);

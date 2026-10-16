@@ -3,9 +3,37 @@
 // compact React HUD that re-renders at most five times a second from the
 // client's version counter, never per entity update.
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BUILDINGS, EMOTES, FAMILIES, HARVEST_RANGE, STAGES, buildingName, type BuildingType, type Emote } from "../shared/content.ts";
-import type { Building, Snapshot } from "../shared/protocol.ts";
-import { averageLife } from "../shared/sim.ts";
+import {
+  BUILDINGS,
+  CLAIM_COST,
+  CLAIM_SIZE,
+  CLAIMS_PER_PLAYER,
+  EFFICIENT_EXTRA,
+  EMOTES,
+  FAMILIES,
+  GOODS,
+  HARVEST_MODES,
+  HARVEST_RANGE,
+  KIT_POWER,
+  LINES,
+  LINE_KINDS,
+  RECIPE_LIST,
+  STAGES,
+  TEND_RANGE,
+  buildingName,
+  itemLabel,
+  type BuildingType,
+  type Cost,
+  type Emote,
+  type Item,
+  type LineKind,
+} from "../shared/content.ts";
+import type { Building, RoomState, Snapshot } from "../shared/protocol.ts";
+import { averageLife, buildCost, shortfalls } from "../shared/sim.ts";
+import { nextRecipe, powerNeed, recipeOf } from "../shared/economy.ts";
+import { lobbyTarget } from "../shared/lobby.ts";
+import { claimAt, footprint, route } from "../shared/layout.ts";
+import { complete, isIdle } from "../shared/world.ts";
 import { GameClient } from "./net.ts";
 import { PLAYER_COLOURS, Renderer, type Tool, type View } from "./render.ts";
 import { Sound, type Mix } from "./audio.ts";
@@ -49,7 +77,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   const [client, setClient] = useState<GameClient | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const soundRef = useRef(new Sound());
-  const viewRef = useRef<View>({ tool: "harvest", build: null, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1 });
+  const viewRef = useRef<View>({ tool: "harvest", build: null, eff: false, line: null, networks: false, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1 });
   const [, force] = useState(0);
   const [help, setHelp] = useState(false);
   const [naming, setNaming] = useState<[number, number] | null>(null);
@@ -76,6 +104,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       soundRef.current.boundary();
       viewRef.current.tool = "harvest";
       viewRef.current.build = null;
+      viewRef.current.line = null;
       viewRef.current.selected = null;
     };
     c.connect();
@@ -155,13 +184,27 @@ export default function Game({ room, name }: { room: string; name: string }): Re
           chooseBuild(type);
         }
       } else if (k === "escape") {
-        setTool("harvest");
+        if (viewRef.current.tool === "line" && viewRef.current.line?.from) {
+          viewRef.current.line.from = null;
+          rerender();
+        } else setTool("harvest");
         setHelp(false);
       } else if (k === "enter") {
         e.preventDefault();
         viewRef.current.keyboardTarget = true;
         const tgt = rendererRef.current?.facingTile();
         if (tgt) act(tgt[0], tgt[1]);
+      } else if (k === "f") {
+        e.preventDefault();
+        quickTend();
+      } else if (k === "c") setTool("claim");
+      else if (k === "l") pickLine(viewRef.current.line?.kind ?? "cable");
+      else if (k === "m") {
+        const me = client.state?.players[client.you];
+        if (me) client.send({ k: "set", mode: me.mode === "careful" ? "intensive" : "careful" });
+      } else if (k === "g") {
+        viewRef.current.networks = !viewRef.current.networks;
+        rerender();
       } else if (k === "x") setTool("demolish");
       else if (k === "i") setTool("inspect");
       else if (k === "n") setTool("mark");
@@ -202,6 +245,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   function setTool(tool: Tool): void {
     view.tool = tool;
     if (tool !== "build") view.build = null;
+    if (tool !== "line") view.line = null;
     if (tool !== "inspect") view.selected = null;
     rerender();
   }
@@ -209,8 +253,37 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   function chooseBuild(type: BuildingType): void {
     view.tool = "build";
     view.build = type;
+    view.line = null;
     view.selected = null;
+    if (!BUILDINGS[type].kit) view.eff = false;
     rerender();
+  }
+
+  function pickLine(kind: LineKind, q: 0 | 1 = 0): void {
+    view.tool = "line";
+    view.build = null;
+    view.selected = null;
+    view.networks = true;
+    view.line = { kind, q: LINES[kind].cost[q] ? q : 0, from: view.line?.kind === kind ? view.line.from : null };
+    rerender();
+  }
+
+  /** Load or collect at the nearest finished machine in reach. */
+  function quickTend(): void {
+    const c = client;
+    const st = c?.state;
+    if (!c || !st) return;
+    let best: Building | null = null;
+    let bd = Infinity;
+    for (const b of st.buildings) {
+      const def = BUILDINGS[b.type];
+      if (!complete(b) || !(b.type === "factory" || b.type === "extractor" || b.type === "intake" || def.tank)) continue;
+      const h = (def.size - 1) / 2;
+      const d = Math.hypot(b.x + h - c.me.x, b.y + h - c.me.y);
+      if (d <= TEND_RANGE + def.size / 2 && d < bd) [bd, best] = [d, b];
+    }
+    if (best) c.send({ k: "tend", x: best.x, y: best.y });
+    else c.toast("Nothing to load or collect in reach: stand beside a factory, harvester, pump or tank.", "bad");
   }
 
   function zoomBy(k: number): void {
@@ -248,7 +321,34 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     const t = st.tiles[y * st.w + x];
     switch (view.tool) {
       case "build":
-        if (view.build) c.send({ k: "build", x, y, type: view.build });
+        if (view.build) c.send({ k: "build", x, y, type: view.build, eff: view.eff && !!BUILDINGS[view.build].kit });
+        break;
+      case "claim": {
+        const owned = claimAt(st, x, y);
+        if (owned) c.send({ k: "unclaim", x, y });
+        else c.send({ k: "claim", x: x - 1, y: y - 1 });
+        break;
+      }
+      case "line": {
+        const ln = view.line;
+        if (!ln) break;
+        if (!ln.from) {
+          ln.from = [x, y];
+          rerender();
+          break;
+        }
+        const path = route(st as RoomState, ln.kind, ln.from, [x, y], c.you);
+        if (!path) {
+          c.toast(`No clear route for a ${ln.kind} there (at most 32 tiles, around buildings and water).`, "bad");
+          break;
+        }
+        c.send({ k: "line", kind: ln.kind, q: ln.q, path });
+        ln.from = null;
+        rerender();
+        break;
+      }
+      case "tend":
+        if (t.b) c.send({ k: "tend", x, y });
         break;
       case "demolish":
         if (t.b) c.send({ k: "demolish", x, y });
@@ -333,14 +433,24 @@ export default function Game({ room, name }: { room: string; name: string }): Re
         <>
           <div className="col-left">
             <StagePanel s={s} />
-            <Economy s={s} />
-            {st.id === "earth" && s.phase.k === "play" && <Memo s={s} />}
+            <Economy s={s} you={client.you} onMode={(mode) => client.send({ k: "set", mode })} />
+            {s.phase.k === "play" && <Memo s={s} you={client.you} />}
+            {s.phase.k === "play" && (s.lobby.agents.length > 0 || s.lobby.bankStart.matter + s.lobby.bankStart.mineral + s.lobby.bankStart.coolant > 0) && <LobbyPanel s={s} />}
           {st.id === "universe" && s.phase.k === "play" && <LastFrontier s={s} you={client.you} onVote={(on) => client.send({ k: "stop", on })} />}
           </div>
           <RoomPanel s={s} client={client} host={host} />
-          <BuildBar s={s} view={view} onPick={chooseBuild} onTool={setTool} />
+          <BuildBar s={s} view={view} onPick={chooseBuild} onTool={setTool} onLine={pickLine} onEff={(on) => { view.eff = on; rerender(); }} onNetworks={() => { view.networks = !view.networks; rerender(); }} />
           <Log s={s} client={client} />
-          {view.selected !== null && <Inspect s={s} b={s.buildings.find((b) => b.id === view.selected)} youId={client.you} host={host} onDemolish={(b) => client.send({ k: "demolish", x: b.x, y: b.y })} onClose={() => setTool("harvest")} />}
+          {view.selected !== null && (
+            <Inspect
+              s={s}
+              b={s.buildings.find((b) => b.id === view.selected)}
+              youId={client.you}
+              host={host}
+              send={(c) => client.send(c)}
+              onClose={() => setTool("harvest")}
+            />
+          )}
           <div className="corner-buttons">
             <div className="emotes" role="group" aria-label="Emotes">
               {EMOTES.map((e, i) => (
@@ -408,6 +518,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
 function StagePanel({ s }: { s: Snapshot }): ReactNode {
   const st = STAGES[s.stage];
   const life = averageLife(s);
+  const drawn = s.econ.drawn;
   return (
       <div className="panel top-left">
         <p className="stage">
@@ -417,7 +528,7 @@ function StagePanel({ s }: { s: Snapshot }): ReactNode {
         <ul className="stocks" aria-label="Natural stock remaining">
           {FAMILIES.map((f) => {
             const l = s.ledger[f];
-            const pct = l.initial ? (l.remaining / l.initial) * 100 : 0;
+            const pct = l.initial ? Math.min(100, (l.remaining / l.initial) * 100) : 0;
             return (
               <li key={f}>
                 <span className="lbl">{st.families[f].label}</span>
@@ -441,6 +552,7 @@ function StagePanel({ s }: { s: Snapshot }): ReactNode {
           {st.energySource === "bottled" && (
             <>
               {" "}· Bottled Sun: <strong>{s.reserve}</strong> energy left
+              {drawn > 0 ? `, drawing ${drawn} a tick (about ${Math.floor(s.reserve / drawn / (s.pace === "rapid" ? 5 : 1))}s at this rate)` : ", nothing drawing"}
             </>
           )}
         </p>
@@ -488,15 +600,19 @@ function RoomPanel({ s, client, host }: { s: Snapshot; client: GameClient; host:
   );
 }
 
-function Economy({ s }: { s: Snapshot }): ReactNode {
+function Economy({ s, you, onMode }: { s: Snapshot; you: string; onMode: (m: "careful" | "intensive") => void }): ReactNode {
   const st = STAGES[s.stage];
   const e = s.econ;
+  const me = s.players[you];
   // the shortage most of the machine is waiting on, so nobody has to inspect buildings one by one
-  const idle = s.buildings.filter((b) => b.status !== "ok" && b.work >= BUILDINGS[b.type].build * 10);
+  const idle = s.buildings.filter((b) => complete(b) && isIdle(b));
   const tally = new Map<string, number>();
   for (const b of idle) tally.set(b.status, (tally.get(b.status) ?? 0) + 1);
   const top = [...tally].sort((a, b) => b[1] - a[1])[0];
   const bottleneck = top ? { n: idle.length, why: top[0] } : null;
+  const o = s.ops;
+  const mode = me ? HARVEST_MODES[me.mode] : HARVEST_MODES.careful;
+  const y = s.pace === "rapid" ? 10 : 1;
   return (
     <div className="panel left">
       <h2>Stockpile (shared)</h2>
@@ -507,10 +623,17 @@ function Economy({ s }: { s: Snapshot }): ReactNode {
             {st.families[f].label}: <strong>{s.inventory[f]}</strong>
           </li>
         ))}
+        {GOODS.map((g) => (
+          <li key={g} className="good">
+            <span className="swatch good" aria-hidden="true" />
+            {st.goods[g]}: <strong>{s.goods[g]}</strong>
+          </li>
+        ))}
       </ul>
       <ul className="inv small">
         <li>
           Power {e.energyUsed}/{e.energySupply}
+          {e.unwired ? ` · ${e.unwired} not cabled` : ""}
         </li>
         <li>
           Compute {e.computeUsed}/{e.computeSupply}
@@ -519,6 +642,24 @@ function Economy({ s }: { s: Snapshot }): ReactNode {
           Workers {e.workersUsed}/{e.workersSupply}
         </li>
       </ul>
+      {me && (
+        <div className="mode" role="group" aria-label="Hand harvesting">
+          <span className="small">Harvest (M):</span>
+          {(["careful", "intensive"] as const).map((m) => (
+            <button key={m} type="button" aria-pressed={me.mode === m} className={me.mode === m ? "on" : ""} onClick={() => onMode(m)}>
+              {m}
+            </button>
+          ))}
+          <p className="small">
+            {me.mode === "careful" ? `takes ${mode.useful * y}, wastes nothing` : `takes ${mode.useful * y}, wastes ${mode.waste * y} more and scars the ground`}
+          </p>
+        </div>
+      )}
+      <p className="small ops">
+        This world: {o.goods} parts made · {o.coolantUsed} {st.families.coolant.label} used{o.coolantLost ? ` (${o.coolantLost} leaked)` : ""} · {o.energyUsed} energy
+        {o.energyGen ? `, ${Math.round((o.solarGen / Math.max(1, o.energyGen)) * 100)}% from ${buildingName(st, "solar")}s` : ""}
+        {o.cableLoss ? ` · ${o.cableLoss} lost in cables` : ""}
+      </p>
       {bottleneck && (
         <p className="small bottleneck">
           <strong>⚠ {bottleneck.n} idle</strong>, mostly “{bottleneck.why.replace(/^(idle|unserved|throttled): /, "")}”
@@ -528,16 +669,35 @@ function Economy({ s }: { s: Snapshot }): ReactNode {
   );
 }
 
-function Memo({ s }: { s: Snapshot }): ReactNode {
+/** The goal checklist: the next useful action on every world, and why. */
+function Memo({ s, you }: { s: Snapshot; you: string }): ReactNode {
+  const st = STAGES[s.stage];
+  const n = (t: BuildingType): string => buildingName(st, t);
+  const built = (t: BuildingType): boolean => s.buildings.some((b) => b.type === t && b.owner && complete(b));
   const has = (t: BuildingType): boolean => s.buildings.some((b) => b.type === t && b.owner);
+  const ore = st.families.mineral.label;
+  const cabled = s.buildings.some((b) => b.type === "factory" && complete(b) && !b.status.includes("not cabled") && !b.status.includes("no power"));
+  const parts = s.ops.goods > 0;
+  const claimed = s.claims.length > 0;
+  const dc = s.buildings.find((b) => b.type === "datacentre" && b.owner && complete(b));
+  const cooled = !!dc && dc.status === "ok";
+  const automated = s.ops.firstAutomation !== null;
+  const inspected = s.buildings.some((b) => b.type === "extractor" && complete(b));
+  const power = st.energySource === "bottled" ? `Cable machines to the ${n(st.id === "system" ? "depot" : "engine")}: it taps the Bottled Sun` : `Power them: a ${n("furnace")} (fast, smoky) or a ${n("solar")} (clean, slow)`;
   const steps: [string, boolean][] = [
-    ["Gather timber and stone (E near a tree or rock)", s.ledger.matter.extracted + s.ledger.mineral.extracted >= 20],
-    ["Build Cottages for workers", has("city")],
-    ["Power them: a Furnace or a Sun Garden", has("furnace") || has("solar")],
-    ["Build a Datacentre (it drinks pond water)", has("datacentre")],
-    ["Put a Harvester beside a grove", has("extractor")],
-    ["Name a favourite place (N)", s.tiles.some((t) => t.mark && t.mark.by !== "the Cooperative") || s.archive.length > 0],
+    ...(st.mechanic === "pressure" ? ([[`Raise a ${n("habitat")}: nothing runs outside its air`, has("habitat")]] as [string, boolean][]) : []),
+    [`Gather ${st.families.matter.label} and ${ore} (E): careful or intensive (M)`, s.ledger.matter.extracted + s.ledger.mineral.extracted >= 20 || has("city")],
+    [`Build ${n("city")}: workers, no power needed`, has("city")],
+    ...(st.energySource === "local" ? ([[power, has("furnace") || has("solar")]] as [string, boolean][]) : []),
+    [`Build a ${n("factory")}, and cable it to power (L)`, cabled],
+    [`Make ${st.goods.wire} and ${st.goods.frame}: load the factory (F), collect the parts`, parts],
+    [`Claim a ${CLAIM_SIZE}×${CLAIM_SIZE} plot (C): the ${n("datacentre")} goes on your own ground`, claimed],
+    [`Build the ${n("datacentre")} on it: 6 ${st.goods.wire}, 2 ${st.goods.frame}`, has("datacentre")],
+    [`Cool it: a ${n("intake")} by the ${st.families.coolant.label}, piped in (or fill it, F)`, cooled],
+    [`Automate: a ${n("extractor")} belted to a ${n("store")} or the factory`, automated],
+    [`Find the bottleneck: inspect (I) what's idle, and choose`, automated && inspected && s.ops.goods >= 12],
   ];
+  void you;
   const next = steps.findIndex(([, done]) => !done);
   if (next === -1) return null;
   return (
@@ -551,6 +711,27 @@ function Memo({ s }: { s: Snapshot }): ReactNode {
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+function LobbyPanel({ s }: { s: Snapshot }): ReactNode {
+  const L = s.lobby;
+  const total = (b: typeof L.bank): number => b.matter + b.mineral + b.coolant;
+  const st = STAGES[s.stage];
+  const picket = L.agents.filter((a) => a.task.k === "picket").length;
+  const restored = FAMILIES.reduce((a, f) => a + s.ledger[f].restored, 0);
+  return (
+    <div className="panel lobby-panel">
+      <h2>The Green Lobby</h2>
+      <p className="small">
+        {L.agents.length ? `${L.agents.length} out (${L.agents.map((a) => a.name).join(", ")})` : L.spent ? "gone home: the seed bank is empty" : "not here yet"}
+        {picket ? `, ${picket} picketing` : ""}. Expect {lobbyTarget(s as RoomState)} while this goes on.
+      </p>
+      <p className="small">
+        Seed bank: <strong>{total(L.bank)}</strong> of {total(L.bankStart)} left (
+        {FAMILIES.filter((f) => L.bankStart[f]).map((f) => `${L.bank[f]} ${st.families[f].label}`).join(", ") || "none"}). Put back so far: {restored}.
+      </p>
     </div>
   );
 }
@@ -579,39 +760,99 @@ function LastFrontier({ s, you, onVote }: { s: Snapshot; you: string; onVote: (o
   );
 }
 
-function BuildBar({ s, view, onPick, onTool }: { s: Snapshot; view: View; onPick: (t: BuildingType) => void; onTool: (t: Tool) => void }): ReactNode {
+const costText = (st: (typeof STAGES)[number], c: Cost): string =>
+  Object.entries(c)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${v} ${itemLabel(st, k as Item)}`)
+    .join(", ");
+
+function BuildBar({
+  s,
+  view,
+  onPick,
+  onTool,
+  onLine,
+  onEff,
+  onNetworks,
+}: {
+  s: Snapshot;
+  view: View;
+  onPick: (t: BuildingType) => void;
+  onTool: (t: Tool) => void;
+  onLine: (k: LineKind, q?: 0 | 1) => void;
+  onEff: (on: boolean) => void;
+  onNetworks: () => void;
+}): ReactNode {
   const st = STAGES[s.stage];
+  const canEff = !!(view.build && BUILDINGS[view.build].kit);
   return (
     <div className="panel bottom" role="toolbar" aria-label="Build and tools">
-      {st.buildings.map((type, i) => {
-        const def = BUILDINGS[type];
-        const short = FAMILIES.filter((f) => (def.cost[f] ?? 0) > s.inventory[f]);
-        const cost = FAMILIES.filter((f) => def.cost[f]).map((f) => `${def.cost[f]} ${st.families[f].label}`).join(", ");
-        return (
-          <button
-            key={type}
-            type="button"
-            className={`build ${view.build === type ? "on" : ""} ${short.length ? "short" : ""}`}
-            aria-pressed={view.build === type}
-            title={def.blurb}
-            aria-label={`${buildingName(st, type)}, costs ${cost || "nothing"}${short.length ? ", can't afford yet" : ""}`}
-            onClick={() => onPick(type)}
-          >
-            <span className="key">{i + 1}</span>
-            <span className="bname">{buildingName(st, type)}</span>
-            <span className="cost">
-              {short.length ? "✕ " : ""}
-              {cost || "free"}
-            </span>
-          </button>
-        );
-      })}
-      <span className="sep" aria-hidden="true" />
-      {(["harvest", "inspect", "demolish", "mark"] as Tool[]).map((t) => (
-        <button key={t} type="button" className={`tool ${view.tool === t ? "on" : ""}`} aria-pressed={view.tool === t} onClick={() => onTool(t)}>
-          {{ harvest: "Harvest (E)", inspect: "Inspect (I)", demolish: "Take down (X)", mark: "Name (N)", build: "" }[t]}
+      <div className="row-buttons">
+        {st.buildings.map((type, i) => {
+          const def = BUILDINGS[type];
+          const cost = buildCost(type, view.build === type && view.eff && !!def.kit);
+          const short = shortfalls(s as RoomState, cost);
+          const text = costText(st, cost);
+          return (
+            <button
+              key={type}
+              type="button"
+              className={`build ${view.build === type ? "on" : ""} ${short.length ? "short" : ""}`}
+              aria-pressed={view.build === type}
+              title={def.blurb}
+              aria-label={`${buildingName(st, type)}, costs ${text || "nothing"}${short.length ? `, short of ${short.join(", ")}` : ""}`}
+              onClick={() => onPick(type)}
+            >
+              <span className="key">{i < 9 ? i + 1 : ""}</span>
+              <span className="bname">{buildingName(st, type)}</span>
+              <span className="cost">
+                {short.length ? "✕ " : ""}
+                {text || "free"}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="row-buttons">
+        {LINE_KINDS.map((k) => (
+          <span key={k} className="linegroup">
+            {([0, 1] as const)
+              .filter((q) => LINES[k].cost[q])
+              .map((q) => {
+                const on = view.tool === "line" && view.line?.kind === k && view.line.q === q;
+                const c = LINES[k].cost[q]!;
+                const short = shortfalls(s as RoomState, c).length > 0;
+                return (
+                  <button
+                    key={q}
+                    type="button"
+                    className={`tool line ${on ? "on" : ""} ${short ? "short" : ""}`}
+                    aria-pressed={on}
+                    title={LINES[k].blurb}
+                    onClick={() => onLine(k, q)}
+                  >
+                    {LINES[k].q[q]} <span className="cost">{costText(st, c)}/tile</span>
+                  </button>
+                );
+              })}
+          </span>
+        ))}
+        <button type="button" className={`tool ${view.networks ? "on" : ""}`} aria-pressed={view.networks} onClick={onNetworks} title="Show cables, pipes, belts and claims">
+          Networks (G)
         </button>
-      ))}
+      </div>
+      <div className="row-buttons">
+        {canEff && (
+          <label className="eff">
+            <input type="checkbox" checked={view.eff} onChange={(e) => onEff(e.target.checked)} /> efficient build (+{costText(st, EFFICIENT_EXTRA)}, slower, kit built in)
+          </label>
+        )}
+        {(["harvest", "tend", "claim", "inspect", "demolish", "mark"] as Tool[]).map((t) => (
+          <button key={t} type="button" className={`tool ${view.tool === t ? "on" : ""}`} aria-pressed={view.tool === t} onClick={() => onTool(t)}>
+            {{ harvest: "Harvest (E)", tend: "Load/collect (F)", claim: `Claim (C) ${costText(st, CLAIM_COST)}`, inspect: "Inspect (I)", demolish: "Take down (X)", mark: "Name (N)", build: "", line: "" }[t]}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -627,32 +868,118 @@ function Log({ s, client }: { s: Snapshot; client: GameClient }): ReactNode {
   );
 }
 
-function Inspect({ s, b, youId, host, onDemolish, onClose }: { s: Snapshot; b: Building | undefined; youId: string; host: boolean; onDemolish: (b: Building) => void; onClose: () => void }): ReactNode {
+function Inspect({ s, b, youId, host, send, onClose }: { s: Snapshot; b: Building | undefined; youId: string; host: boolean; send: (c: import("../shared/protocol.ts").Command) => void; onClose: () => void }): ReactNode {
   if (!b) return null;
   const st = STAGES[s.stage];
   const def = BUILDINGS[b.type];
   const owner = b.owner ? (s.players[b.owner]?.name ?? "someone") : "the Cooperative";
-  const done = b.work >= def.build * 10;
+  const done = complete(b);
+  const need = b.need ?? def.build * 10;
+  const mine = b.owner === youId || host || (b.owner === null && !def.protected);
   const io: string[] = [];
-  if (def.energy) io.push(def.energy > 0 ? `+${def.energy * (b.type === "solar" ? st.solarScale : 1)} power` : `uses ${-def.energy} power`);
-  if (def.workers) io.push(def.workers > 0 ? `houses ${def.workers}–5 workers` : `employs ${-def.workers} workers`);
+  const pw = powerNeed(b);
+  if (def.energy > 0) io.push(`+${b.type === "solar" ? def.energy * st.solarScale : def.energy - (b.kit ? KIT_POWER.furnace ?? 0 : 0)} power${b.type === "furnace" ? `, burns ${b.kit ? "1 every other tick" : "1"} ${st.families.matter.label}, only when its grid needs it` : ""}`);
+  if (pw) io.push(`uses ${pw} power${b.kit && KIT_POWER[b.type] ? ` (${KIT_POWER[b.type]} for the kit)` : ""}`);
+  if (def.workers) io.push(def.workers > 0 ? `houses ${def.workers}, ${def.workers + 3} served` : `employs ${-def.workers}`);
   if (def.compute) io.push(def.compute > 0 ? `+${def.compute} compute` : `uses ${-def.compute} compute`);
-  if (def.coolantUse) io.push(`drinks ${def.coolantUse} ${st.families.coolant.label}`);
-  if (def.fuelUse) io.push(`burns ${def.fuelUse} ${st.families.matter.label}`);
-  if (def.extract) io.push(`harvests ${def.extract} from a neighbour`);
+  if (def.coolantUse) io.push(`drinks ${b.kit ? "1 every other tick" : def.coolantUse} ${st.families.coolant.label} from its tank`);
+  if (b.type === "extractor") {
+    const m = HARVEST_MODES[b.mode ?? "intensive"];
+    io.push(b.mode === "careful" ? `harvests ${b.kit ? 2 : 1} a tick, wastes nothing` : `harvests ${m.useful} a tick and destroys ${m.waste} more, scarring the ground`);
+  }
+  const store = (x?: Partial<Record<Item, number>>): string => costText(st, x ?? {}) || "empty";
   const canDemolish = !def.protected && (def.renderValue ? host : b.owner === youId || host);
+  const salvage = Object.entries(b.paid ?? def.cost)
+    .map(([k, v]) => `${Math.floor((v ?? 0) / 2)} ${itemLabel(st, k as Item)}`)
+    .join(", ");
+  const next = b.type === "factory" ? nextRecipe(s as RoomState, b) : null;
   return (
     <div className="panel inspect" role="dialog" aria-label={`${buildingName(st, b.type)} details`}>
-      <h2>{b.name ?? buildingName(st, b.type)}</h2>
-      <p className="small">Built by {owner}. {def.blurb}</p>
-      <p>
-        Status: <strong>{done ? (b.status === "ok" ? "running" : b.status) : `under construction (${Math.round((b.work / (def.build * 10)) * 100)}%) — press E beside it to help`}</strong>
+      <h2>
+        {b.name ?? buildingName(st, b.type)}
+        {b.kit ? " · efficient" : ""}
+      </h2>
+      <p className="small">
+        {b.owner === youId ? "Yours." : `${owner}'s.`} {def.blurb}
       </p>
+      <p>
+        Status: <strong>{done ? (b.status === "ok" ? "running" : b.status) : `${b.status} (${Math.round((b.work / need) * 100)}%): press E beside it to help`}</strong>
+      </p>
+      {b.legacy && <p className="small">From before the factory chain: on the old shared grid, cooled from the stockpile.</p>}
       <p className="small">Per tick: {io.join(" · ") || "nothing"}</p>
+      {b.kit && def.kit && <p className="small">Kit: {def.kit}.</p>}
+      {b.type === "factory" && (
+        <>
+          <p className="small">
+            Inputs: {store(b.buf)} · output: {store(b.out)}
+            {b.job ? ` · making ${b.job.n} ${itemLabel(st, b.job.r)}, ${b.job.left} tick${b.job.left === 1 ? "" : "s"} left` : ""}
+            {next && "why" in next ? ` · ${next.why}` : ""}
+          </p>
+          <p className="small">
+            Recipes ({b.kit && !b.quick ? "efficient" : "quick"}):{" "}
+            {RECIPE_LIST.map((r) => `${costText(st, recipeOf(b, r).in)} → ${recipeOf(b, r).out} ${itemLabel(st, r)} in ${recipeOf(b, r).ticks}`).join(" · ")}
+          </p>
+          {mine && (
+            <div className="row">
+              <label>
+                Make{" "}
+                <select value={b.recipe ?? "auto"} onChange={(e) => send({ k: "set", x: b.x, y: b.y, recipe: e.target.value as "auto" })}>
+                  <option value="auto">parts for the next {buildingName(st, "datacentre")}</option>
+                  {RECIPE_LIST.map((r) => (
+                    <option key={r} value={r}>
+                      {itemLabel(st, r)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {b.recipe && b.recipe !== "auto" && (
+                <label>
+                  stop at{" "}
+                  <input type="number" min={0} max={99} value={b.target ?? 0} onChange={(e) => send({ k: "set", x: b.x, y: b.y, target: Math.max(0, Math.min(99, Math.round(Number(e.target.value) || 0))) })} style={{ width: "4rem" }} />
+                </label>
+              )}
+              {b.kit && (
+                <label>
+                  <input type="checkbox" checked={!!b.quick} onChange={(e) => send({ k: "set", x: b.x, y: b.y, quick: e.target.checked })} /> quick recipes anyway
+                </label>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {b.type === "extractor" && (
+        <p className="small">
+          Hopper: {store(b.out)} · harvested {b.made ?? 0} so far
+          {mine && (
+            <>
+              {" "}
+              <button type="button" onClick={() => send({ k: "set", x: b.x, y: b.y, mode: b.mode === "careful" ? "intensive" : "careful" })}>
+                Switch to {b.mode === "careful" ? "intensive" : "careful"}
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {(def.tank || b.type === "intake") && !b.legacy && (
+        <p className="small">
+          Tank: {b.tank ?? 0}/{def.tank ?? 20} {st.families.coolant.label}
+          {b.type === "intake" ? ` · pumped ${b.made ?? 0} so far` : ""}
+        </p>
+      )}
       <div className="row">
+        {done && (b.type === "factory" || b.type === "extractor" || b.type === "intake" || !!def.tank) && (
+          <button type="button" onClick={() => send({ k: "tend", x: b.x, y: b.y })}>
+            {b.type === "factory" ? "Load / collect (F)" : b.type === "extractor" || b.type === "intake" ? "Collect (F)" : "Fill tank (F)"}
+          </button>
+        )}
+        {done && def.kit && !b.kit && mine && (
+          <button type="button" onClick={() => send({ k: "upgrade", x: b.x, y: b.y })} disabled={s.goods.kit < 1} title={def.kit}>
+            Fit efficiency kit ({s.goods.kit} in stock): {def.kit}
+          </button>
+        )}
         {canDemolish && (
-          <button type="button" onClick={() => onDemolish(b)}>
-            {def.renderValue ? `Render down (+${def.renderValue} energy, forever)` : "Take down (half back)"}
+          <button type="button" onClick={() => send({ k: "demolish", x: b.x, y: b.y })}>
+            {def.renderValue ? `Render down (+${def.renderValue} energy, forever)` : `Take down (back: ${salvage || "nothing"})`}
           </button>
         )}
         <button type="button" onClick={onClose}>Close</button>
@@ -667,12 +994,16 @@ function Help({ onClose, st }: { onClose: () => void; st: (typeof STAGES)[number
       <div className="card help">
         <h2 id="help-h">How to play</h2>
         <ul>
-          <li><kbd>WASD</kbd> or arrows: walk. Wheel or <kbd>+</kbd>/<kbd>-</kbd>: zoom.</li>
-          <li><kbd>E</kbd>/<kbd>Space</kbd> (hold): harvest whatever's in reach, or help raise a building site. Or click a deposit.</li>
-          <li><kbd>1</kbd>–<kbd>6</kbd>: pick a building. A ghost shows where it goes and why it can't. Click, or <kbd>Enter</kbd> for the tile you face. <kbd>Esc</kbd> cancels.</li>
-          <li><kbd>I</kbd> inspect · <kbd>X</kbd> take down (half back) · <kbd>N</kbd> name a place · <kbd>V</kbd> survey the remaining stock · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
+          <li><kbd>WASD</kbd> or arrows: walk (faster on a path). Wheel or <kbd>+</kbd>/<kbd>-</kbd>: zoom.</li>
+          <li><kbd>E</kbd>/<kbd>Space</kbd> (hold): harvest whatever's in reach, or help raise a building site. <kbd>M</kbd> switches careful (takes 1, wastes nothing) and intensive (takes 2, destroys 1 more).</li>
+          <li><kbd>1</kbd>–<kbd>9</kbd>: pick a building. The ghost shows every shortage and why it can't go there. Click, or <kbd>Enter</kbd> for the tile you face. <kbd>Esc</kbd> cancels.</li>
+          <li><kbd>F</kbd>: load the factory beside you from the shared stockpile and collect what it made; collect a harvester's hopper or a pump's tank; fill a datacentre's or dome's tank.</li>
+          <li><kbd>L</kbd>: lay a line. Click its start, then its end. Cables carry power (a grid only has what its own generators make), pipes carry coolant from a pump, belts carry items toward their arrow, paths are quicker to walk on. <kbd>G</kbd> shows them all.</li>
+          <li><kbd>C</kbd>: claim a {CLAIM_SIZE}×{CLAIM_SIZE} plot (up to {CLAIMS_PER_PLAYER}). A datacentre has to sit inside your own claim; nobody else can build or take things down there, but anyone can walk, harvest and connect.</li>
+          <li><kbd>I</kbd> inspect (recipes, upgrades, why it's idle) · <kbd>X</kbd> take down (half back) · <kbd>N</kbd> name a place · <kbd>V</kbd> survey · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
         </ul>
-        <p>Everything you gather goes into the room's shared stockpile. Buildings remember who built them; only the builder or the host can take one down.</p>
+        <p>The chain on every world: gather, house workers, power, a factory, parts, a claim, a datacentre, then harvesters and belts so nobody has to carry everything. Rushing is quicker and wastes more; efficient kits and careful harvesting take setup and last longer.</p>
+        <p>The Green Lobby walks the land too, putting stock back from a seed bank that runs out, and picketing datacentre sites for a while.</p>
         <p>When every deposit on this world is gone, the room moves on together. There are five worlds.</p>
         <p><strong>{st.name}:</strong> {MECHANIC_HINT[st.mechanic]}</p>
         <button type="button" onClick={onClose} autoFocus>Back to the world</button>
@@ -717,13 +1048,14 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
         <h2>{st.departure}</h2>
         <table>
           <thead>
-            <tr><th scope="col">Stock</th><th scope="col">Was</th><th scope="col">Extracted</th><th scope="col">Destroyed</th></tr>
+            <tr><th scope="col">Stock</th><th scope="col">Was</th><th scope="col">Put back</th><th scope="col">Extracted</th><th scope="col">Destroyed</th></tr>
           </thead>
           <tbody>
             {FAMILIES.map((f) => (
               <tr key={f}>
                 <th scope="row">{st.families[f].label}</th>
                 <td>{sum.ledger[f].initial}</td>
+                <td>{sum.ledger[f].restored}</td>
                 <td>{sum.ledger[f].extracted}</td>
                 <td>{sum.ledger[f].destroyed}</td>
               </tr>
@@ -734,6 +1066,12 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
           {st.id === "earth" ? "Living land" : "Untouched ground"}: {sum.lifeStart}% → {sum.lifeEnd}%.{" "}
           {sum.lost.length ? `Lost: ${sum.lost.join(", ")}.` : ""}
         </p>
+        {sum.ops && (
+          <p className="small">
+            {sum.ops.goods} parts made · {sum.ops.coolantUsed} {st.families.coolant.label} used ({sum.ops.coolantLost} leaked) · {sum.ops.energyUsed} energy
+            {sum.ops.busy ? ` · datacentres ran for ${sum.ops.busy} ticks` : " · no datacentre ever ran"}
+          </p>
+        )}
         <p className="small">{next ? `Leaving for ${next.name} in ${secs}s.` : `The engine looks for a next frontier… ${secs}s`}</p>
       </div>
     </div>
@@ -775,6 +1113,28 @@ function Ending({ s }: { s: Snapshot }): ReactNode {
             <p className="search" aria-hidden="true">searching… 0 found</p>
           </>
         )}
+        <h3>What the machine did with it</h3>
+        <table className="ledger-table">
+          <thead>
+            <tr><th scope="col">World</th><th scope="col">Used</th><th scope="col">Wasted</th><th scope="col">Put back</th><th scope="col">Left</th><th scope="col">Parts</th><th scope="col">Datacentres ran</th></tr>
+          </thead>
+          <tbody>
+            {s.history.map((h, i) => {
+              const sum = (k: "extracted" | "destroyed" | "restored" | "remaining"): number => FAMILIES.reduce((a, f) => a + h.ledger[f][k], 0);
+              return (
+                <tr key={i}>
+                  <th scope="row">{STAGES.find((x) => x.id === h.stage)?.name}</th>
+                  <td>{sum("extracted")}</td>
+                  <td>{sum("destroyed")}</td>
+                  <td>{sum("restored")}</td>
+                  <td>{sum("remaining")}</td>
+                  <td>{h.ops?.goods ?? "–"}</td>
+                  <td>{h.ops ? `${h.ops.busy} ticks` : "–"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
         <h3>What was named, and what became of it</h3>
         <ul className="archive">
           {s.archive.map((a, i) => (

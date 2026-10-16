@@ -2,7 +2,8 @@
 // (mutated in place, read by the renderer every frame) and a version counter
 // the HUD polls at a few hertz, so React never sees per-entity updates.
 import { PROTOCOL_VERSION, type ClientMsg, type Command, type Delta, type LogEntry, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
-import { PLAYER_SPEED, TICK_MS } from "../shared/content.ts";
+import { TICK_MS } from "../shared/content.ts";
+import { speedAt } from "../shared/layout.ts";
 
 export type Status = "connecting" | "live" | "reconnecting" | "error";
 
@@ -37,6 +38,8 @@ export class GameClient {
   swingUntil = 0;
   /** fired on every applied tile change: the renderer spawns effects from these */
   onTile: ((i: number, before: number, after: number) => void) | null = null;
+  /** previous positions of the Green Lobby's agents, for smooth drawing between updates */
+  lobbySamples = new Map<number, Sample[]>();
   onAck: ((ok: boolean, c: Command, reason?: string) => void) | null = null;
   onBoundary: (() => void) | null = null;
 
@@ -207,11 +210,38 @@ export class GameClient {
       else s.buildings.push(b);
     }
     if (d.removed) s.buildings = s.buildings.filter((b) => !d.removed!.includes(b.id));
+    if (d.lobby) {
+      s.lobby = d.lobby;
+      for (const a of d.lobby.agents) this.sampleLobby(a.id, a.x, a.y);
+    }
     if (d.meta) Object.assign(s, d.meta);
     if (d.log) {
       s.log = [...s.log, ...d.log].slice(-40) as LogEntry[];
     }
     this.bump();
+  }
+
+  private sampleLobby(id: number, x: number, y: number): void {
+    const buf = this.lobbySamples.get(id) ?? [];
+    buf.push({ t: performance.now(), x, y });
+    while (buf.length > 8) buf.shift();
+    this.lobbySamples.set(id, buf);
+  }
+
+  /** Where a lobbyist is drawn: interpolated like a remote player. */
+  lobbyPosition(id: number, x: number, y: number): [number, number] {
+    const buf = this.lobbySamples.get(id);
+    if (!buf?.length) return [x, y];
+    const t = performance.now() - TICK_MS * 2;
+    for (let i = buf.length - 1; i > 0; i--) {
+      const a = buf[i - 1];
+      const b = buf[i];
+      if (a.t <= t) {
+        const k = Math.min(1, Math.max(0, (t - a.t) / Math.max(1, b.t - a.t)));
+        return [a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k];
+      }
+    }
+    return [buf[0].x, buf[0].y];
   }
 
   private sample(id: string, x: number, y: number): void {
@@ -242,8 +272,10 @@ export class GameClient {
     const s = this.state;
     if (!s || s.phase.k === "ended") return;
     const w = s.w - 1;
-    this.me.x = Math.max(0, Math.min(w, this.me.x + this.me.dx * PLAYER_SPEED * dt));
-    this.me.y = Math.max(0, Math.min(w, this.me.y + this.me.dy * PLAYER_SPEED * dt));
+    // the same speed rule as the server (faster along a path), so prediction stays exact
+    const v = speedAt(s, this.me.x, this.me.y);
+    this.me.x = Math.max(0, Math.min(w, this.me.x + this.me.dx * v * dt));
+    this.me.y = Math.max(0, Math.min(w, this.me.y + this.me.dy * v * dt));
   }
 
   private reconcile(x: number, y: number): void {
