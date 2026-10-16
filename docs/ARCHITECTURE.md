@@ -17,12 +17,12 @@ browser                                      one Fly machine (shared-cpu-1x, 256
 
 | Directory | Holds |
 | --- | --- |
-| `shared/` | content and balance data, the protocol types, world generation, and the simulation; pure TypeScript, no I/O, imported by both sides |
+| `shared/` | content and balance data (`content.ts`), the protocol types, world generation, grid helpers (`layout.ts`), the command handlers (`sim.ts`), the economy tick (`economy.ts`), the Green Lobby (`lobby.ts`) and shared mutation helpers (`world.ts`); pure TypeScript, no I/O, imported by both sides |
 | `server/` | the HTTP and WebSocket server, live room management, SQLite storage |
 | `app/` | Next.js routes: the front page and the play shell (the client-only boundary) |
 | `client/` | the browser game: network client, renderer, audio, HUD |
 | `spec/` | the tests (see [`TESTING.md`](TESTING.md)) |
-| `scripts/` | the playtest bot and the course's evidence check |
+| `scripts/` | the playtest bot (`playbot.ts` over the wire, `brain.ts` its decisions, also used by the spec) and the course's evidence check |
 
 ## Choices, and why
 
@@ -35,7 +35,9 @@ browser                                      one Fly machine (shared-cpu-1x, 256
 
 The server owns every room's state; the browser renders it and sends intentions. All mutation goes through `applyCommand` and `tick` in `shared/sim.ts`, called one at a time on Node's single thread, so every mutation is serialised. Two players placing on the same tile, two builds spending the same balance, two hands on the last unit: whichever command the server reads first wins; the other gets a reason. Payment and occupancy are committed in the same synchronous block with nothing between them that can fail.
 
-Every command is validated server-side: session (the socket's player), membership, stage generation, phase, integer and in-bounds coordinates, finite movement vectors, range (2.2 tiles to harvest, 8 to build), cooldowns, footprint and terrain, affordability, ownership, and string length.
+Every command is validated server-side: session (the socket's player), membership, stage generation, phase, integer and in-bounds coordinates, finite movement vectors, range (2.2 tiles to harvest, 3 to load, 8 to build, 14 to lay a line), cooldowns, footprint and terrain, claims, affordability in raw stock and goods, ownership of buildings, lines and claims, line shape (contiguous, no self-crossing, at most 32 tiles), recipe and mode names, and string length. `placementProblem`, `claimProblem` and `linePathProblem` are the same functions the browser's ghost previews call, so a preview and the server's verdict agree; only the server's counts.
+
+**The economy tick** (`shared/economy.ts`) runs in a fixed order: construction (picketed sites at half speed), workers, each cable grid's generation (furnaces light only for a grid that needs them; the Bottled Sun tapped only for the shortfall), pumps, pipes, domes, relays, datacentres, factories, harvesters, homes, belts, heat, pollution. Within each kind it goes by building id, so allocation never depends on message order. Then exhaustion is checked, and only then the Green Lobby acts (`shared/lobby.ts`), so a spent world can't be replanted.
 
 **Movement** is a continuous intent (a direction vector); the server integrates it at 10 Hz. There are no collisions, so the browser predicts its own avatar exactly and eases toward the server's answer, snapping only if more than 1.5 tiles off. Other avatars are interpolated two ticks behind the latest update.
 
@@ -43,19 +45,19 @@ Every command is validated server-side: session (the socket's player), membershi
 
 ## Protocol
 
-Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 1`. A client and server on different versions refuse each other ("this page is out of date: reload it").
+Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 2`. A client and server on different versions refuse each other ("this page is out of date: reload it").
 
 Client to server:
 
 - `hello {v, room, token?, name}`: join; a known token resumes that player, anything else makes a new one
-- `cmd {id, inc, gen, c}`: an intention (`move`, `harvest`, `build`, `demolish`, `emote`, `mark`) with a client-chosen id, the room incarnation and the stage generation it was meant for
+- `cmd {id, inc, gen, c}`: an intention (`move`, `harvest`, `build` (optionally efficient), `claim`, `unclaim`, `line`, `unline`, `tend` (load or collect), `set` (harvest mode, recipe, target), `upgrade`, `demolish`, `emote`, `mark`, `stop`) with a client-chosen id, the room incarnation and the stage generation it was meant for
 - `sync`: ask for a fresh snapshot
 - `ping {n}`
 
 Server to client:
 
 - `welcome {v, inc, you, token, snap}`: a full snapshot (state minus other players' tokens and receipts) and its sequence number
-- `delta {seq, gen, tick, players, moves?, tiles?, buildings?, removed?, meta?, log?}`: changes since the previous delta, sent only when something changed, at most once per tick
+- `delta {seq, gen, tick, players, moves?, tiles?, buildings?, removed?, lobby?, meta?, log?}`: changes since the previous delta, sent only when something changed, at most once per tick. Lines (cable, pipe, belt and its load, path) travel inside tiles; the Green Lobby's agents and seed bank as `lobby` whenever one moves; goods, claims and this world's operating measurements inside `meta`
 - `ack {id, ok, reason?}`: for every command except `move`
 - `error {reason}`, `pong {n}`
 
@@ -74,17 +76,31 @@ Server to client:
 ## Persistence
 
 - **Store**: `DATA_DIR/plenty.db` (SQLite, WAL), table `rooms(code, schema, state, saved_at)`, the whole `RoomState` as JSON. World, sequence and receipts are in one row, so they can't disagree about what was applied.
-- **Schema**: `SCHEMA_VERSION` in each row; migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`). A row from a different schema version refuses to load rather than load wrongly.
+- **Schema**: `SCHEMA_VERSION` (now 2) in each row. Table migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`); a row saved at an older schema is brought forward on load by `server/migrate.ts` (schema 1 rooms get no goods, no claims, zero restored, a fresh lobby, and their buildings marked `legacy` so their economy keeps running), and a row from a newer schema refuses to load rather than load wrongly.
 - **Save frequency**: every 5 s while a room has changed, immediately when a room empties, immediately at every stage boundary (before anyone is told about it), and for every room on SIGTERM or SIGINT.
 - **Maximum rollback**: 5 s of play after an abrupt crash. A rolled-back command's receipt rolls back with it, so a retry after recovery is treated as new, not wrongly acknowledged as done. The spec kills the server with SIGKILL to check this.
 - **Transitions survive crashes**: the transition state is saved before it's announced, and the next world is a pure function of the saved seed and stage, so a restart during a transition finishes it exactly once with the same map and no doubled carryover.
 - **Backup**: the volume is a single point of failure. `fly volumes snapshots list -a <app>` shows Fly's daily volume snapshots (retained five days by default); restoring one is `fly volumes create data --snapshot-id <id>` and pointing the machine at it. Copying the file off with `fly ssh sftp get /data/plenty.db` is the manual backup.
 
+## The action log
+
+Every action is one line on the server's stdout, so `flyctl logs -a <app>` alone tells who did what, on both sides of the fight:
+
+```
+room=K7PQM stage=earth tick=443 actor=efcb2936-256 name=Bo action=build building=datacentre id=10 x=8 y=8 eff=false cost="4 mineral + 4 matter + 6 wire + 2 frame"
+room=K7PQM stage=earth tick=444 actor=lobby:Sorrel name=Sorrel action=lobby_picket building=10 owner=efcb2936-256 x=8 y=8
+room=K7PQM stage=earth tick=434 actor=8f2ac63d-ca8 name=Ada action=refused cmd=claim reason="that's Bo's land"
+room=K7PQM stage=earth tick=266 actor=8f2ac63d-ca8 name=Ada action=factory_batch machine=3 made="2 wire" x=13 y=13
+room=K7PQM stage=earth tick=74 actor=lobby:Fern name=Fern action=lobby_restore family=matter amount=6 x=18 y=7 bank_left=112
+```
+
+The simulation records events in `Changes.events` as it applies commands and ticks; `server/rooms.ts` prints them as logfmt when it flushes, before the delta goes out. `actor` is the player's id (stable for that browser in that room) or `lobby:<name>`, `name` the display name. An autonomous factory batch names its owner and machine id. Lines are logged one per completed path, harvests when a tile is emptied or every twentieth unit, and refusals only when they concern someone else's ground or machine. Tokens are never logged.
+
 ## Rooms, sessions and empty rooms
 
 Room codes are five characters from a 31-letter alphabet without lookalikes. A code identifies a room; it doesn't authorise anything. An address can create 60 rooms an hour, and rooms nobody ever joined are deleted after a day. Authority is the per-player token the server mints on first join (18 random bytes), which the browser keeps in localStorage per room and presents on reconnect. A second tab with the same token takes over from the first. A room seats eight connected players; it remembers up to 32 identities, and past that forgets the one gone longest (its buildings stay, credited to "someone"), so browsers that came once and left can never fill a room.
 
-A room with nobody connected pauses: no ticks, saved, and unloaded after a minute. Its next visitor loads it under a new incarnation. Why, and what that costs, is [ADR 0001](adr/0001-empty-rooms-pause.md).
+A room with nobody connected pauses: no ticks (the Green Lobby included), saved, and unloaded after a minute. Its next visitor loads it under a new incarnation. Why, and what that costs, is [ADR 0001](adr/0001-empty-rooms-pause.md).
 
 ## Deployment on Fly.io
 

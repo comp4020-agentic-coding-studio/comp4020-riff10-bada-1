@@ -42,8 +42,9 @@ export default function Home() {
       <div className="card hero">
         <h1>Plenty</h1>
         <p className="lede">
-          Arrive on a little island with your friends. Gather, build homes, power them, teach a datacentre to do the gathering for you. Grow. When
-          the island is used up, the Plenty Cooperative has another world ready. It has five.
+          Arrive on a little island with your friends. Gather, build homes, run a factory, stake a claim, earn a datacentre and teach it to do the
+          gathering for you. The Green Lobby will put some of it back, for a while. When the island is used up, the Plenty Cooperative has another
+          world ready. It has five.
         </p>
         <label>
           Your name <input value={name} maxLength={16} onChange={(e) => setName(e.target.value)} placeholder="Guest" />
@@ -64,7 +65,7 @@ export default function Home() {
         </form>
         {error && <p role="alert" className="bad">{error}</p>}
         <p className="small">
-          2–8 players, no account, desktop browser with a keyboard. <a href="/readme/">About the game and how it works</a>
+          2–8 players, no account, best in a desktop browser with a keyboard. <a href="/readme/">About the game and how it works</a>
         </p>
       </div>
     </main>

@@ -40,8 +40,9 @@ Plenty is a multiplayer game: one Node process (`server/`) owns every room's sim
 ## What the game must never do
 
 - Let a browser decide an outcome. Clients send intentions; `applyCommand` and `tick` decide, one at a time. Validate every field server-side, whatever the UI allows.
-- Make or lose natural stock off the books. Every family keeps `initial = remaining + extracted + destroyed`, and `ledgerHolds` must stay true on every tick. Inventories are whole numbers and never negative. Salvage stays strictly below cost.
-- Leave a deposit unreachable. Buildings can't cover a deposit with stock left, and nothing blocks movement; keep both true or replace them with another guarantee.
+- Make or lose natural stock off the books. Every family keeps `initial + restored = remaining + extracted + destroyed`, and `ledgerHolds` must stay true on every tick. The Green Lobby's finite, per-family seed bank is the only source of `restored`; nothing else creates stock. Goods and machine buffers are separate whole-number stores outside the ledger, never negative, and transfers conserve them. Salvage stays strictly below cost, goods and kits included; buffered contents come back once.
+- Leave a deposit unreachable. Buildings can't cover a deposit with stock left, nothing blocks movement, and claims never stop walking or harvesting; keep all three true or replace them with another guarantee.
+- Gate leaving a world on anything but exact exhaustion. The chain (factory, claim, datacentre) guides play; it never blocks a transition, and the lobby stops the moment a world is spent.
 - Advance a world without its players, or wipe a finished campaign. Empty rooms pause ([ADR 0001](docs/adr/0001-empty-rooms-pause.md)); the ending is permanent and a new campaign is a new room.
 - Accept a write or a WebSocket from another origin, or render user text as anything but text (React children, `textContent`, `fillText`).
 
@@ -49,13 +50,15 @@ Plenty is a multiplayer game: one Node process (`server/`) owns every room's sim
 
 - One owner per room: one process, one Fly machine, `--ha=false`. Replicas need owner routing first.
 - A stage boundary is saved before it's announced, and the next world is a pure function of seed and stage.
-- Bump `PROTOCOL_VERSION` for an incompatible wire change and `SCHEMA_VERSION` (with a migration in `server/store.ts`) for an incompatible saved-state change.
+- Bump `PROTOCOL_VERSION` for an incompatible wire change and `SCHEMA_VERSION` (with a migration in `server/migrate.ts`) for an incompatible saved-state change.
+- Economy allocation runs in a fixed order (building id, tile order), never message order. Idle, blocked or disconnected machines consume nothing.
+- Every player and lobby action is an event (`Changes.events`) the server prints as one logfmt line with the actor's id and name. Never log a token.
 - React never renders per-entity updates: the renderer reads `GameClient.state` in its own frame loop; the HUD polls at 5 Hz.
 - Shared code is imported with explicit `.ts` extensions and uses erasable TypeScript only, because node runs `server/` and `shared/` with type stripping.
 - `pnpm check` passes before a commit. It needs a running server: `pnpm build && pnpm start`, or `APP_URL`.
 
 ## Working on it
 
-- `node scripts/playbot.ts <ROOM> [url] [name]` fills a room with a bot that plays; use bots plus a browser to see later worlds and dense scenes.
-- Balance lives in `shared/content.ts`. Re-measure pacing after changing it (hand-harvest-only bots, normal pace) and update `docs/DESIGN.md`.
+- `node scripts/playbot.ts <ROOM> [url] [name] [rush|green|hand]` fills a room with a bot that plays the chain; its decisions are `scripts/brain.ts`, which the spec also runs. Use bots plus a browser to see later worlds and dense scenes.
+- Balance lives in `shared/content.ts`. Re-measure pacing after changing it (hand, rush and green bots, normal pace) and update the tables in `docs/DESIGN.md`.
 - When you change behaviour, update the doc that describes it in the same commit.

@@ -8,7 +8,7 @@ What was checked, how, and what it showed. Targets and results are kept apart, a
 
 **`spec/sim.test.ts`**, the simulation with no browser or socket:
 
-- resource accounting: `initial = remaining + extracted + destroyed` for every family on every tick of a whole two-player campaign, inventories never negative or non-integer, and the campaign reaches the ending
+- resource accounting: `initial + restored = remaining + extracted + destroyed` for every family on every tick of a whole two-player campaign (and `restored` plus what's left in the seed bank equals the bank it started with), inventories never negative or non-integer, and the campaign reaches the ending
 - exactly one transition per exhausted world (stage generations 2, 3, 4, 5) and one history entry per world, each ending at zero remaining
 - a building's cost is charged once; salvage returns strictly less than the cost
 - furnace smoke records burnt stock as _destroyed_, and the ledger still balances
@@ -26,6 +26,23 @@ What was checked, how, and what it showed. Targets and results are kept apart, a
 - the restraint ending: only in the Universe, only when everyone present agrees, harvesting withdraws a vote, a holdout's dropped connection never completes it, and the ledger still balances with stock left
 - a crash mid-transition (state serialised at the Sun's boundary, restored, resumed) yields the same next world, the same generation and the same Bottled Sun as the uninterrupted run: no duplicate generation, no doubled carryover
 
+The factory chain, claims, networks and the Green Lobby (crit 10):
+
+- a datacentre is refused without goods ("needs 6 wire (have 0)"), outside any claim ("claim this ground first") and on someone else's ("that's A's land"), and is built from the parts on its owner's claim
+- on every one of the five worlds, two bots starting from the starter crate (no goods, no compute) reach a working factory and a finished datacentre, the ledger holding every tick
+- a factory turns ore loaded from the stockpile into wire, collected back into it, and the natural ledger doesn't move; a batch commits exactly its recipe, and switching recipe mid-batch, a reconnect, or a save and reload produce exactly one batch; idle states name missing inputs, a full output, and a missing cable; with a kit, the same ore makes more wire, more slowly
+- claims: can't be drawn over another player's building; never block a hand harvest or walking; the host can give one up; at most two per player
+- salvage of an efficient datacentre returns strictly less than it cost (goods included) and its tank's coolant exactly once; a kit fitted later never comes back whole
+- careful harvesting takes less and destroys nothing; intensive takes more and destroys real stock; with one or two units left, both take what's there and intensive wastes nothing it can't
+- a datacentre with no cable draws no power (`unwired` counts it), then idles on an empty tank, then runs once filled
+- a pump and cheap pipe to a datacentre: everything pumped is in a tank, was drunk or leaked, with the leak exactly the persisted counter's whole units
+- a belt carries one item a tile per economy tick into a store; a belt into nothing blocks and conserves its items; taking a loaded belt up returns its load once
+- the lobby replants a harvested grove and logs it with its name and the tile; stripped of stock, it plants until its bank is empty to the unit, family by family, then goes home; it pickets a datacentre site for at most its bounded ticks and the site still finishes; a world still ends at exhaustion with the lobby active, and it stops at once
+- rushed against sustainable bots on one Earth: both reach a factory, a datacentre and automation; the rush gets its datacentre sooner, destroys more than five times as much, and never buys a kit; the green route extracts more useful stock and keeps its datacentre running longer
+- both strategies finish a whole five-world campaign with the books balanced on every tick and a datacentre on every world
+- an equal Bottled Sun makes more parts through an efficient factory than a quick one before it runs out, and an idle factory leaves the reserve alone
+- a schema-1 room migrates with no goods, no claims and zero restored, keeps its datacentre, and the datacentre keeps running
+
 **`spec/server.test.ts`**, the real server over HTTP and WebSocket:
 
 - `/`, `/play/` and `/api/health` answer
@@ -36,15 +53,16 @@ What was checked, how, and what it showed. Targets and results are kept apart, a
 - messages built to throw when coerced (an `id` or `n` that's an object with a broken `toString`) are refused, and the server and room carry on: an independent review found this crashed the whole process
 - malformed messages are refused without disturbing the room
 - **restart recovery**: a private server on its own data directory is stopped with SIGTERM and restarted; the player rejoins as themselves under a new incarnation and the harvested tile is as they left it
-- **crash recovery**: the same after SIGKILL, once the 5 s save interval has passed
+- **crash recovery**: the same after SIGKILL, once the 5 s save interval has passed (both now check the ledger's extracted count rather than one tile, since a lobbyist may replant that tile in between)
+- **the action log**: a private server's stdout names both players' joins with their ids and names, a harvest-mode change, a lobbyist's arrival, every line in the `room= stage= tick= actor= name= action=` shape, and never either player's token
 
 **`spec/invariants.test.ts`**, the course's: `/` answers and `/readme/` publishes this README with every heading.
 
-30 tests, all passing locally and against the production Docker image.
+51 tests, all passing locally against a freshly built server.
 
 ## Multiplayer playthroughs
 
-`scripts/playbot.ts` joins a room over the real protocol and plays: walks, harvests by hand, and builds each world's machine (homes, power, compute, extractors, domes, radiators, relays) wherever the server accepts. Bots and real browsers (driven by `agent-browser`, headless Chrome) shared rooms throughout:
+`scripts/playbot.ts` joins a room over the real protocol and plays with the decisions in `scripts/brain.ts`: the whole chain (homes, power, a factory and its parts, a claim, a datacentre, pumps and pipes, harvesters belted to stores, domes, radiators, relays, kits) wherever the server accepts. The spec runs the same decisions directly against the simulation. Bots and real browsers (driven by `agent-browser`, headless Chrome) shared rooms throughout:
 
 - **Full campaign**: two bots and two browsers, rapid preset, Earth to the ending in about six minutes. Every stage boundary, the Bottled Sun carryover, the remnant worlds in the Solar System and Universe, and the ending's archive appeared in both browsers.
 - **Both browsers saw the same world**: same buildings, same damage, each other's avatars and names, emotes.
@@ -52,6 +70,14 @@ What was checked, how, and what it showed. Targets and results are kept apart, a
 - **Keyboard only**: walk, harvest with `E`, choose a building with `2`, place it with `Enter`. This caught a real bug (a stump refusing a building) and a crash path in the key handler.
 - **Dense rooms**: one room at the 8-player cap (seven bots and a browser) plus three more rooms of four bots each.
 - **Delay and jitter**: a TCP proxy adding 150 ± 100 ms each way, in order (a 430 ms round trip as measured by the in-game ping), with a browser and a bot playing through it beside an unlagged browser. Movement stayed smooth (own avatar is predicted), actions were confirmed a round trip later, nothing was applied twice or lost, and the stockpile stayed consistent across all three.
+
+**The factory chain in a real browser** (crit 10), `agent-browser` at 1920×1080 and 390×844 beside a rush bot on the rapid preset:
+
+- **Ownership conflict**: with the bot's claim and datacentre in place, the browser player picked a Plaza and pointed at the bot's ground. The ghost read "✕ that's Bo's land", the click was refused with the same toast, and the server log recorded `action=refused cmd=build reason="that's Bo's land"` under the browser player's id and name.
+- **Placing and removing a line**: `L`, a click on each end; the preview read "cable: 3 new tiles, 3 metal ore. Click to lay", and the server logged `action=line kind=cable tiles=3`. `X` on one of those tiles took it up (`action=unline`).
+- **Recovering from a shortage**: the bot's factory sat at "idle: no metal ore (needs 3, has 1)". The browser player walked over and pressed `F`: the server logged the load (`loaded="2 mineral + 1 matter"`) and the factory's next batch three ticks later.
+- **Mobile**: at 390×844 the toolbar scrolls, the corner buttons sit above it, and tapping open ground walked the player there.
+- Console clean throughout; a two-bot rapid room was driven from Earth into Mars with a browser watching.
 
 ## Visual inspection
 
@@ -98,13 +124,15 @@ Answered from bot runs and browser play, not from human playtesters, which this 
 - **Deployment**: this run doesn't deploy; CI deploys the pod's app on push. Nothing here claims a verified live deployment.
 - **Human playtesting**: everything above is bots and a scripted browser.
 - **An ordinary laptop**: see performance.
-- **Mobile and touch**: renders, isn't playable.
+- **Mobile and touch**: tap to walk works; laying lines and claiming by touch work but are fiddly, and no human has tried it.
+- **Human playtests of the factory chain**: the pacing table in `DESIGN.md` is bots, who know the recipes. A first-time group will be slower to the datacentre.
 
 ## Next development, in priority order
 
-1. Human playtests of the first ten minutes and the ending, then tuning from what people actually do.
-2. Interest management (send each client only nearby tile changes) before maps grow.
-3. Sprite art for buildings and avatars, replacing the procedural shapes one family at a time (see [`ASSETS.md`](ASSETS.md)).
-4. Host moderation: remove a player, lock a room to new joiners.
-5. A photo album kept per room, so the archive has pictures, not just names.
-6. Touch controls.
+1. Human playtests of the first ten minutes (factory, claim, datacentre, first belt) and the ending, then tuning from what people actually do.
+2. A splitter tile for belts. Machines already split their output round-robin across every belt leading away and merges take turns, but there's no mid-belt junction yet.
+3. Interest management (send each client only nearby tile changes) before maps grow.
+4. Sprite art for buildings and avatars, replacing the procedural shapes one family at a time (see [`ASSETS.md`](ASSETS.md)).
+5. Host moderation: remove a player, lock a room to new joiners.
+6. A photo album kept per room, so the archive has pictures, not just names.
+7. Touch-first line laying (drag to draw).
