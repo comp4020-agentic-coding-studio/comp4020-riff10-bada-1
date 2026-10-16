@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BUILDINGS, FAMILIES, STAGES } from "../shared/content.ts";
-import type { RoomState } from "../shared/protocol.ts";
+import type { Building, RoomState } from "../shared/protocol.ts";
+import { routeBetween, touching } from "../shared/layout.ts";
 import { applyCommand, createRoom, join, leave, ledgerHolds, newChanges, tick, totalRemaining, bundleOk, type Changes } from "../shared/sim.ts";
 
 // The authoritative simulation, exercised directly: no browser, no socket.
@@ -32,6 +33,15 @@ const freeTile = (s: RoomState, size = 1): [number, number] => {
       }
   throw new Error("no free tile");
 };
+/** Lay a cable between two buildings, standing at its midpoint. */
+function cable(s: RoomState, ch: Changes, pid: string, a: Building, b: Building, kind: "cable" | "pipe" = "cable"): void {
+  const free = (q: Building): number[] => touching(s, q).filter((i) => !s.tiles[i].b);
+  const path = routeBetween(s, kind, free(a), new Set(free(b)), pid);
+  expect(path).not.toBeNull();
+  const [mx, my] = path![Math.floor(path!.length / 2)];
+  stand(s, pid, mx, my);
+  expect(applyCommand(s, pid, id(), s.gen, { k: "line", kind, q: 0, path: path! }, ch)).toEqual({ ok: true });
+}
 const stand = (s: RoomState, pid: string, x: number, y: number): void => {
   s.players[pid].x = x;
   s.players[pid].y = y;
@@ -106,6 +116,9 @@ describe("resource accounting", () => {
     expect(applyCommand(s, "a", id(), s.gen, { k: "build", x: spot![0], y: spot![1], type: "furnace" }, ch).ok).toBe(true);
     const [cx, cy] = freeTile(s, 2);
     expect(applyCommand(s, "a", id(), s.gen, { k: "build", x: cx, y: cy, type: "city" }, ch).ok).toBe(true);
+    for (let i = 0; i < 60; i++) tick(s, ch);
+    // a furnace burns only for a grid that needs it: cable it to the homes
+    cable(s, ch, "a", s.buildings.find((b) => b.type === "furnace")!, s.buildings.find((b) => b.type === "city")!);
     for (let i = 0; i < 200; i++) tick(s, ch);
     expect(s.ledger.matter.destroyed).toBeGreaterThan(0);
     expect(ledgerHolds(s)).toBe(true);
